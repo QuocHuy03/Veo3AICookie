@@ -8,11 +8,12 @@ import random
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import sys
 import requests
 import pandas as pd
 
-
+from auth.auth_guard import check_key_online
+API_URL = "http://62.171.131.164:5000"
 GENERATE_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoText"
 GENERATE_IMAGE_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage"
 CHECK_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus"
@@ -80,7 +81,7 @@ def get_session_config() -> Dict[str, Any]:
 	return {
 		"verify": True,
 		"allow_redirects": True,
-		"timeout": (10, 30)  # (connect timeout, read timeout)
+		"timeout": (60, 300)  # (connect timeout, read timeout) - tăng timeout lên 5 phút cho video generation
 	}
 
 
@@ -105,7 +106,7 @@ def add_random_delay(min_delay: float = 0.1, max_delay: float = 0.5) -> None:
 
 
 
-def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optional[Dict[str, str]] = None, max_retries: int = 3) -> Dict[str, Any]:
+def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optional[Dict[str, str]] = None, max_retries: int = 5) -> Dict[str, Any]:
 	headers = get_api_headers(token)
 	session_config = get_session_config()
 	
@@ -122,15 +123,39 @@ def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optiona
 			else:
 				add_random_delay(0.1, 0.5)
 			
+			# Thử với proxy trước, nếu lỗi thì thử không proxy
+			current_proxy = proxy
+			if attempt > 0 and proxy:
+				print(f"🔄 Lần thử {attempt + 1}: Thử không proxy...")
+				current_proxy = None
+			
 			resp = session.post(
 				url, 
 				data=json.dumps(payload), 
-				proxies=proxy,
+				proxies=current_proxy,
 				**session_config
 			)
 			resp.raise_for_status()
 			return resp.json()
 			
+		except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError) as e:
+			print(f"❌ Lỗi proxy/connection (lần thử {attempt + 1}/{max_retries}): {e}")
+			if attempt < max_retries - 1:
+				print(f"🔄 Thử lại sau {2 ** attempt} giây...")
+				time.sleep(2 ** attempt)
+				continue
+			else:
+				raise
+				
+		except requests.exceptions.Timeout as e:
+			print(f"⏰ Timeout (lần thử {attempt + 1}/{max_retries}): {e}")
+			if attempt < max_retries - 1:
+				print(f"🔄 Thử lại sau {3 ** attempt} giây...")
+				time.sleep(3 ** attempt)  # Delay lâu hơn cho timeout
+				continue
+			else:
+				raise
+				
 		except requests.HTTPError as e:
 			# Debug: In ra response chi tiết khi có lỗi
 			print(f"❌ Lỗi HTTP {e.response.status_code} (lần thử {attempt + 1}/{max_retries}): {e.response.text}")
@@ -350,7 +375,7 @@ def extract_op_name(response_json: Dict[str, Any]) -> str:
 	return name
 
 
-def poll_status(token: str, operation_name: str, scene_id: str, interval_sec: float = 3.0, timeout_sec: int = 600, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def poll_status(token: str, operation_name: str, scene_id: str, interval_sec: float = 3.0, timeout_sec: int = 1200, proxy: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
 	deadline = time.time() + timeout_sec
 	last_status = None
 	while time.time() < deadline:
@@ -414,7 +439,25 @@ def _read_cookie_header_from_file(path: str) -> Optional[str]:
 		return None
 
 
-def _read_proxy_from_file(path: str) -> Optional[Dict[str, str]]:
+def _test_proxy_connection(proxy: Dict[str, str], timeout: int = 10) -> bool:
+	"""Test kết nối proxy bằng cách gọi một URL đơn giản"""
+	try:
+		session = requests.Session()
+		session.proxies.update(proxy)
+		# Test với một URL đơn giản
+		response = session.get("https://httpbin.org/ip", timeout=timeout)
+		if response.status_code == 200:
+			print("✓ Proxy connection test thành công")
+			return True
+		else:
+			print(f"⚠ Proxy test failed với status: {response.status_code}")
+			return False
+	except Exception as e:
+		print(f"❌ Proxy connection test thất bại: {e}")
+		return False
+
+
+def _read_proxy_from_file(path: str, test_connection: bool = True) -> Optional[Dict[str, str]]:
 	"""Đọc proxy từ file proxy.txt và trả về dict proxy cho requests"""
 	try:
 		with open(path, "r", encoding="utf-8") as f:
@@ -425,21 +468,39 @@ def _read_proxy_from_file(path: str) -> Optional[Dict[str, str]]:
 			# Format: ip:port:username:password
 			parts = content.split(":")
 			if len(parts) != 4:
-				print(f"Cảnh báo: Format proxy không đúng trong {path}. Cần: ip:port:username:password")
+				print(f"⚠ Cảnh báo: Format proxy không đúng trong {path}. Cần: ip:port:username:password")
 				return None
 			
 			ip, port, username, password = parts
 			
+			# Validate IP và port
+			try:
+				int(port)
+			except ValueError:
+				print(f"⚠ Cảnh báo: Port không hợp lệ: {port}")
+				return None
+			
 			# Tạo proxy dict cho requests
 			proxy_url = f"http://{username}:{password}@{ip}:{port}"
-			return {
+			proxy_dict = {
 				"http": proxy_url,
 				"https": proxy_url
 			}
+			
+			print(f"✓ Đã tải proxy: {ip}:{port}")
+			
+			# Test connection nếu được yêu cầu
+			if test_connection:
+				if not _test_proxy_connection(proxy_dict):
+					print("⚠ Proxy không hoạt động, sẽ chạy không proxy")
+					return None
+			
+			return proxy_dict
 	except FileNotFoundError:
+		print(f"⚠ Không tìm thấy file proxy: {path}")
 		return None
 	except Exception as e:
-		print(f"Lỗi đọc file proxy: {e}")
+		print(f"❌ Lỗi đọc file proxy: {e}")
 		return None
 
 
@@ -499,10 +560,33 @@ def sanitize_filename(filename: str) -> str:
 	"""Làm sạch tên file để tránh ký tự không hợp lệ"""
 	# Loại bỏ ký tự không hợp lệ cho tên file
 	filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-	# Giới hạn độ dài tên file
-	if len(filename) > 200:
-		filename = filename[:200]
+	# Loại bỏ ký tự xuống dòng và tab
+	filename = re.sub(r'[\n\r\t]', '_', filename)
+	# Loại bỏ khoảng trắng thừa
+	filename = re.sub(r'\s+', ' ', filename)
+	# Giới hạn độ dài tên file (Windows có giới hạn 255 ký tự cho đường dẫn đầy đủ)
+	# Để an toàn, giới hạn ở 100 ký tự cho tên file
+	if len(filename) > 100:
+		filename = filename[:100]
 	return filename.strip()
+
+
+def create_short_filename(stt: int, prompt: str) -> str:
+	"""Tạo tên file ngắn gọn từ STT và prompt"""
+	# Lấy 50 ký tự đầu của prompt và làm sạch
+	short_prompt = prompt[:50].strip()
+	short_prompt = sanitize_filename(short_prompt)
+	
+	# Tạo tên file với format: STT_short_description.mp4
+	filename = f"{stt}_{short_prompt}.mp4"
+	
+	# Đảm bảo tên file không quá dài
+	if len(filename) > 100:
+		# Nếu vẫn quá dài, chỉ lấy STT và một phần nhỏ của prompt
+		short_prompt = short_prompt[:30]
+		filename = f"{stt}_{short_prompt}.mp4"
+	
+	return filename
 
 
 def read_excel_prompts(excel_file: str, require_image: bool = False) -> List[Tuple[int, str, Optional[str]]]:
@@ -606,9 +690,8 @@ def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, st
 	try:
 		print(f"[Thread {threading.current_thread().name}] Bắt đầu xử lý STT {stt}: {prompt[:50]}...")
 		
-		# Tạo tên file output
-		safe_prompt = sanitize_filename(prompt)
-		output_filename = f"{stt}_{safe_prompt}.mp4"
+		# Tạo tên file output ngắn gọn
+		output_filename = create_short_filename(stt, prompt)
 		output_path = os.path.join(output_dir, output_filename)
 		
 		# Generate video
@@ -1050,9 +1133,9 @@ def main():
 		cookie_header_value = _read_cookie_header_from_file(cookie_file)
 		if cookie_header_value:
 			try:
-				# Đọc proxy tạm thời để lấy token
+				# Đọc proxy tạm thời để lấy token (không test connection để tránh delay)
 				proxy_file = os.getenv("AISANDBOX_PROXY_FILE") or "proxy.txt"
-				temp_proxy = _read_proxy_from_file(proxy_file)
+				temp_proxy = _read_proxy_from_file(proxy_file, test_connection=False)
 				session_token = fetch_access_token_from_session(cookie_header_value, temp_proxy)
 				if session_token:
 					token = session_token
@@ -1066,13 +1149,13 @@ def main():
 	project_id = os.getenv("AISANDBOX_PROJECT_ID") or "9f3a5641-aca2-40b5-98d0-af8dbec0ecd3"
 	model_key = os.getenv("AISANDBOX_MODEL_KEY") or "veo_3_0_t2v_fast_ultra"
 	
-	# Đọc proxy từ file
+	# Đọc proxy từ file với test connection
 	proxy_file = os.getenv("AISANDBOX_PROXY_FILE") or "proxy.txt"
-	proxy = _read_proxy_from_file(proxy_file)
+	proxy = _read_proxy_from_file(proxy_file, test_connection=True)
 	if proxy:
-		print("✓ Đã tải cấu hình proxy từ file")
+		print("✓ Đã tải và test proxy thành công")
 	else:
-		print("⚠ Không sử dụng proxy")
+		print("⚠ Không sử dụng proxy (file không tồn tại hoặc proxy không hoạt động)")
 	
 	# Thông báo về các thông số giả lập
 	print("✓ Đã kích hoạt các thông số giả lập trình duyệt thật:")
@@ -1137,5 +1220,62 @@ def main():
 		process_single_image_batch(prompt, image_path, token, project_id, "veo_3_i2v_s_fast_ultra", max_workers, output_dir, proxy=proxy, cookie_header_value=cookie_header_value)
 
 
+# === UTILITY FUNCTIONS ===
+def ensure_dir(path):
+    """Ensure directory exists"""
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+def center_line(text, width=70):
+    """Center text within given width"""
+    return text.center(width)
+
+def print_box(info):
+    """Print authentication info in a formatted box"""
+    box_width = 70
+    print("╔" + "═" * (box_width - 2) + "╗")
+    print("║" + center_line("🔐 XÁC THỰC KEY THÀNH CÔNG", box_width - 2) + "║")
+    print("╠" + "═" * (box_width - 2) + "╣")
+    print("║" + center_line(f"🔑 KEY       : {info.get('key')}", box_width - 2) + "║")
+    print("║" + center_line(f"📅 Hết hạn    : {info.get('expires')}", box_width - 2) + "║")
+    print("║" + center_line(f"🔁 Số lượt    : {info.get('remaining')}", box_width - 2) + "║")
+    print("╠" + "═" * (box_width - 2) + "╣")
+    print("║" + center_line("🧠 Info dev @huyit32", box_width - 2) + "║")
+    print("║" + center_line("📧 qhuy.dev@gmail.com", box_width - 2) + "║")
+    print("╚" + "═" * (box_width - 2) + "╝")
+
+# === MAIN EXECUTION ===
 if __name__ == "__main__":
-	main()
+    API_AUTH = f"{API_URL}/api/make_video_ai/auth"
+    MAX_RETRIES = 5
+
+    print("\n📌 XÁC THỰC KEY ĐỂ SỬ DỤNG CÔNG CỤ - VEO3 AI\n")
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        key = input(f"🔑 Nhập API Key (Lần {attempt}/{MAX_RETRIES}): ").strip()
+        success, message, info = check_key_online(key, API_AUTH)
+
+        if success:
+            print("\n" + message + "\n")
+            print_box(info)
+            print()
+
+            run_now = input("▶️  Bạn có muốn chạy chương trình ngay bây giờ không? (Y/n): ").strip().lower()
+            if run_now in ("", "y", "yes"):
+                print("🚀 Khởi động VEO3 AI...")
+                app = main()
+                app.run()
+            else:
+                print("✋ Bạn đã chọn không chạy chương trình. Thoát.")
+            break
+        else:
+            print(f"\n {message}")
+            if attempt < MAX_RETRIES:
+                print("↩️  Vui lòng thử lại...\n")
+                time.sleep(1)
+            else:
+                print("\n🚫 Đã nhập sai quá 5 lần. Thoát chương trình.")
+                print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                print("🧠 Info dev @huyit32 | 📧 qhuy.dev@gmail.com")
+                print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                sys.exit(1)
