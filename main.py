@@ -293,7 +293,13 @@ def upload_image(token: str, image_path: str, proxy: Optional[Dict[str, str]] = 
 def generate_video(token: str, prompt: str, project_id: str, model_key: str = "veo_3_0_t2v_fast_ultra", aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE", seed: Optional[int] = None, proxy: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], str]:
 	"""Generate video và trả về response cùng với scene_id được tạo"""
 	if seed is None:
-		seed = int(time.time()) % 65535
+		# Đọc seed từ config, nếu seed = 0 thì random
+		config = _load_config()
+		config_seed = config.get("seed", 0)
+		if config_seed == 0:
+			seed = int(time.time()) % 65535
+		else:
+			seed = config_seed
 	
 	# Tạo scene_id ngẫu nhiên
 	scene_id = str(uuid.uuid4())
@@ -321,7 +327,13 @@ def generate_video(token: str, prompt: str, project_id: str, model_key: str = "v
 def generate_video_from_image(token: str, prompt: str, media_id: str, project_id: str, model_key: str = "veo_3_i2v_s_fast_ultra", aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE", seed: Optional[int] = None, proxy: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], str]:
 	"""Generate video từ image + prompt và trả về response cùng với scene_id được tạo"""
 	if seed is None:
-		seed = int(time.time()) % 65535
+		# Đọc seed từ config, nếu seed = 0 thì random
+		config = _load_config()
+		config_seed = config.get("seed", 0)
+		if config_seed == 0:
+			seed = int(time.time()) % 65535
+		else:
+			seed = config_seed
 	
 	# Tạo scene_id ngẫu nhiên
 	scene_id = str(uuid.uuid4())
@@ -455,6 +467,22 @@ def _test_proxy_connection(proxy: Dict[str, str], timeout: int = 10) -> bool:
 	except Exception as e:
 		print(f"❌ Proxy connection test thất bại: {e}")
 		return False
+
+
+def _load_config() -> Dict[str, Any]:
+	"""Đọc cấu hình từ file config.json"""
+	try:
+		with open("config.json", "r", encoding="utf-8") as f:
+			return json.load(f)
+	except FileNotFoundError:
+		print("⚠ File config.json không tồn tại, sử dụng giá trị mặc định")
+		return {}
+	except json.JSONDecodeError as e:
+		print(f"⚠ Lỗi đọc file config.json: {e}, sử dụng giá trị mặc định")
+		return {}
+	except Exception as e:
+		print(f"⚠ Lỗi không xác định khi đọc config.json: {e}, sử dụng giá trị mặc định")
+		return {}
 
 
 def _read_proxy_from_file(path: str, test_connection: bool = True) -> Optional[Dict[str, str]]:
@@ -1146,8 +1174,9 @@ def main():
 		raise RuntimeError("Thiếu token. Đặt AISANDBOX_TOKEN hoặc tạo file token.txt")
 
 	# Cấu hình chung
-	project_id = os.getenv("AISANDBOX_PROJECT_ID") or "9f3a5641-aca2-40b5-98d0-af8dbec0ecd3"
-	model_key = os.getenv("AISANDBOX_MODEL_KEY") or "veo_3_0_t2v_fast_ultra"
+	config = _load_config()
+	project_id = os.getenv("AISANDBOX_PROJECT_ID") or config.get("project_id", "66a1a7a3-c9d9-4c42-a07e-44f2baecf60b")
+	model_key = os.getenv("AISANDBOX_MODEL_KEY") or config.get("model_key", "veo_3_0_t2v_fast_ultra")
 	
 	# Đọc proxy từ file với test connection
 	proxy_file = os.getenv("AISANDBOX_PROXY_FILE") or "proxy.txt"
