@@ -1148,6 +1148,16 @@ def get_user_input():
 
 
 def main():
+
+	text = r"""
+ __     _______ ___    _____      _    ___ 
+ \ \   / / ____/ _ \  |___ /     / \  |_ _|
+  \ \ / /|  _|| | | |   |_ \    / _ \  | | 
+   \ V / | |__| |_| |  ___) |  / ___ \ | | 
+    \_/  |_____\___/  |____/  /_/   \_\___|
+	"""
+	print(text)
+
 	# Input qua env hoặc file
 	token = os.getenv("AISANDBOX_TOKEN") or ""
 	token_file = os.getenv("AISANDBOX_TOKEN_FILE") or "token.txt"
@@ -1292,8 +1302,7 @@ if __name__ == "__main__":
             run_now = input("▶️  Bạn có muốn chạy chương trình ngay bây giờ không? (Y/n): ").strip().lower()
             if run_now in ("", "y", "yes"):
                 print("🚀 Khởi động VEO3 AI...")
-                app = main()
-                app.run()
+                main()
             else:
                 print("✋ Bạn đã chọn không chạy chương trình. Thoát.")
             break
