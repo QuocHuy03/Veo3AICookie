@@ -33,11 +33,13 @@ def check_key_online(key: str, api_url: str):
             "key": key,
             "device_id": device_id_hash
         }, timeout=10)
+      
 
         try:
             res = response.json()
             message = res.get("message", f"❌ HTTP {response.status_code}")
         except Exception:
+            print(response.text)
             message = f"❌ HTTP {response.status_code} (no JSON)"
             res = {}
 

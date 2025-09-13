@@ -105,6 +105,54 @@ def add_random_delay(min_delay: float = 0.1, max_delay: float = 0.5) -> None:
 	time.sleep(random.uniform(min_delay, max_delay))
 
 
+def auto_retry_with_backoff(func, *args, max_retries: int = 3, base_delay: float = 1.0, 
+                           max_delay: float = 60.0, backoff_factor: float = 2.0, 
+                           retry_on_exceptions: tuple = (Exception,), **kwargs):
+	"""
+	Tự động retry một hàm với exponential backoff
+	
+	Args:
+		func: Hàm cần retry
+		*args: Arguments cho hàm
+		max_retries: Số lần retry tối đa
+		base_delay: Delay cơ bản (giây)
+		max_delay: Delay tối đa (giây)
+		backoff_factor: Hệ số tăng delay
+		retry_on_exceptions: Tuple các exception cần retry
+		**kwargs: Keyword arguments cho hàm
+	
+	Returns:
+		Kết quả của hàm nếu thành công
+		
+	Raises:
+		Exception cuối cùng nếu hết số lần retry
+	"""
+	last_exception = None
+	
+	for attempt in range(max_retries + 1):  # +1 vì attempt đầu tiên không phải retry
+		try:
+			return func(*args, **kwargs)
+		except retry_on_exceptions as e:
+			last_exception = e
+			
+			if attempt < max_retries:
+				# Tính delay với exponential backoff
+				delay = min(base_delay * (backoff_factor ** attempt), max_delay)
+				# Thêm jitter để tránh thundering herd
+				jitter = random.uniform(0.1, 0.3) * delay
+				final_delay = delay + jitter
+				
+				print(f"🔄 Lỗi lần {attempt + 1}/{max_retries + 1}: {str(e)[:100]}...")
+				print(f"⏳ Thử lại sau {final_delay:.1f} giây...")
+				time.sleep(final_delay)
+			else:
+				print(f"❌ Đã thử {max_retries + 1} lần nhưng vẫn lỗi: {str(e)}")
+				break
+	
+	# Nếu đến đây thì đã hết số lần retry
+	raise last_exception
+
+
 
 def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optional[Dict[str, str]] = None, max_retries: int = 5) -> Dict[str, Any]:
 	headers = get_api_headers(token)
@@ -712,10 +760,20 @@ def read_excel_prompts(excel_file: str, require_image: bool = False) -> List[Tup
 
 
 def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, str, Optional[Dict[str, str]], Optional[str]]) -> Tuple[int, str, bool, str]:
-	"""Xử lý một prompt đơn lẻ trong thread riêng"""
+	"""Xử lý một prompt đơn lẻ trong thread riêng với auto retry"""
 	stt, prompt, image_path, token, project_id, model_key, output_dir, proxy, cookie_header_value = args
 	
-	try:
+	# Đọc cấu hình retry từ config
+	config = _load_config()
+	retry_config = config.get("auto_retry", {})
+	enable_auto_retry = retry_config.get("enable_auto_retry", True)
+	max_retries = retry_config.get("max_retries", 3)
+	base_delay = retry_config.get("base_delay", 2.0)
+	max_delay = retry_config.get("max_delay", 30.0)
+	backoff_factor = retry_config.get("backoff_factor", 2.0)
+	
+	def _process_prompt_internal():
+		"""Hàm internal để retry"""
 		print(f"[Thread {threading.current_thread().name}] Bắt đầu xử lý STT {stt}: {prompt[:50]}...")
 		
 		# Tạo tên file output ngắn gọn
@@ -726,12 +784,8 @@ def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, st
 		if image_path and os.path.exists(image_path):
 			# Có image - upload image trước, rồi generate video từ image + prompt
 			print(f"[Thread {threading.current_thread().name}] Upload image: {image_path}")
-			try:
-				media_id = upload_image(token, image_path, proxy)
-				print(f"[Thread {threading.current_thread().name}] ✅ Upload thành công - Media ID: {media_id}")
-			except Exception as e:
-				print(f"[Thread {threading.current_thread().name}] ❌ Upload thất bại: {e}")
-				raise
+			media_id = upload_image(token, image_path, proxy)
+			print(f"[Thread {threading.current_thread().name}] ✅ Upload thành công - Media ID: {media_id}")
 			
 			# Generate video từ image + prompt
 			print(f"[Thread {threading.current_thread().name}] 🎬 Bắt đầu tạo video từ image + prompt...")
@@ -740,6 +794,7 @@ def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, st
 			# Không có image - generate video từ prompt only
 			print(f"[Thread {threading.current_thread().name}] 🎬 Bắt đầu tạo video từ prompt...")
 			gen_resp, scene_id = generate_video(token, prompt, project_id, model_key, proxy=proxy)
+			media_id = None
 		
 		op_name = extract_op_name(gen_resp)
 		
@@ -754,7 +809,7 @@ def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, st
 		
 		# Sau khi tải xong, nếu có media_id (luồng image), thực hiện xóa media trên server
 		try:
-			if 'media_id' in locals() and media_id and cookie_header_value:
+			if media_id and cookie_header_value:
 				print(f"[Thread {threading.current_thread().name}] 🧹 Xóa media tạm trên server...")
 				delete_media([media_id], cookie_header_value, proxy)
 		except Exception as e:
@@ -762,9 +817,29 @@ def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, st
 		
 		print(f"[Thread {threading.current_thread().name}] ✅ Hoàn thành STT {stt}: {output_filename}")
 		return (stt, prompt, True, output_filename)
-			
+	
+	try:
+		if enable_auto_retry:
+			# Sử dụng auto retry với cấu hình từ config
+			return auto_retry_with_backoff(
+				_process_prompt_internal,
+				max_retries=max_retries,
+				base_delay=base_delay,
+				max_delay=max_delay,
+				backoff_factor=backoff_factor,
+				retry_on_exceptions=(
+					requests.exceptions.RequestException,
+					requests.exceptions.Timeout,
+					requests.exceptions.ConnectionError,
+					requests.exceptions.HTTPError,
+					Exception  # Có thể retry với mọi exception
+				)
+			)
+		else:
+			# Không sử dụng auto retry, chạy trực tiếp
+			return _process_prompt_internal()
 	except Exception as e:
-		print(f"[Thread {threading.current_thread().name}] Lỗi xử lý STT {stt}: {e}")
+		print(f"[Thread {threading.current_thread().name}] ❌ Lỗi xử lý STT {stt} sau khi retry: {e}")
 		return (stt, prompt, False, str(e))
 
 
@@ -775,6 +850,12 @@ def process_single_prompt_batch(prompt: str, token: str, project_id: str,
                                cookie_header_value: Optional[str] = None) -> None:
 	"""Xử lý một prompt duy nhất nhưng tạo nhiều video với đa luồng"""
 	
+	# Đọc cấu hình retry để hiển thị thông tin
+	config = _load_config()
+	retry_config = config.get("auto_retry", {})
+	enable_auto_retry = retry_config.get("enable_auto_retry", True)
+	max_retries = retry_config.get("max_retries", 3)
+	
 	# Tạo thư mục output nếu chưa có
 	os.makedirs(output_dir, exist_ok=True)
 	
@@ -782,6 +863,10 @@ def process_single_prompt_batch(prompt: str, token: str, project_id: str,
 	prompts = [(i+1, prompt, None) for i in range(max_workers)]
 	
 	print(f"Bắt đầu xử lý prompt '{prompt}' với {max_workers} luồng...")
+	if enable_auto_retry:
+		print(f"🔄 Auto retry: BẬT (tối đa {max_retries} lần retry cho mỗi prompt)")
+	else:
+		print(f"🔄 Auto retry: TẮT")
 	
 	# Chuẩn bị arguments cho mỗi thread
 	args_list = [
@@ -832,6 +917,12 @@ def process_single_image_batch(prompt: str, image_path: str, token: str, project
                               cookie_header_value: Optional[str] = None) -> None:
 	"""Xử lý một prompt + image duy nhất nhưng tạo nhiều video với đa luồng"""
 	
+	# Đọc cấu hình retry để hiển thị thông tin
+	config = _load_config()
+	retry_config = config.get("auto_retry", {})
+	enable_auto_retry = retry_config.get("enable_auto_retry", True)
+	max_retries = retry_config.get("max_retries", 3)
+	
 	# Tạo thư mục output nếu chưa có
 	os.makedirs(output_dir, exist_ok=True)
 	
@@ -839,6 +930,10 @@ def process_single_image_batch(prompt: str, image_path: str, token: str, project
 	prompts = [(i+1, prompt, image_path) for i in range(max_workers)]
 	
 	print(f"Bắt đầu xử lý prompt '{prompt}' với image '{image_path}' và {max_workers} luồng...")
+	if enable_auto_retry:
+		print(f"🔄 Auto retry: BẬT (tối đa {max_retries} lần retry cho mỗi prompt)")
+	else:
+		print(f"🔄 Auto retry: TẮT")
 	
 	# Chuẩn bị arguments cho mỗi thread
 	args_list = [
@@ -889,6 +984,12 @@ def process_excel_batch(excel_file: str, token: str, project_id: str,
                        cookie_header_value: Optional[str] = None) -> None:
 	"""Xử lý batch từ file Excel với đa luồng"""
 	
+	# Đọc cấu hình retry để hiển thị thông tin
+	config = _load_config()
+	retry_config = config.get("auto_retry", {})
+	enable_auto_retry = retry_config.get("enable_auto_retry", True)
+	max_retries = retry_config.get("max_retries", 3)
+	
 	# Tạo thư mục output nếu chưa có
 	os.makedirs(output_dir, exist_ok=True)
 	
@@ -903,6 +1004,10 @@ def process_excel_batch(excel_file: str, token: str, project_id: str,
 		return
 	
 	print(f"Bắt đầu xử lý {len(prompts)} prompt với {max_workers} luồng...")
+	if enable_auto_retry:
+		print(f"🔄 Auto retry: BẬT (tối đa {max_retries} lần retry cho mỗi prompt)")
+	else:
+		print(f"🔄 Auto retry: TẮT")
 	
 	# Chuẩn bị arguments cho mỗi thread
 	args_list = [

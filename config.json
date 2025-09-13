@@ -1,5 +1,12 @@
 {
   "project_id": "66a1a7a3-c9d9-4c42-a07e-44f2baecf60b",
   "model_key": "veo_3_0_t2v_fast",
-  "seed": 0
+  "seed": 0,
+  "auto_retry": {
+    "max_retries": 3,
+    "base_delay": 2.0,
+    "max_delay": 30.0,
+    "backoff_factor": 2.0,
+    "enable_auto_retry": true
+  }
 }
