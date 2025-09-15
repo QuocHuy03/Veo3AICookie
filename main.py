@@ -85,19 +85,6 @@ def get_session_config() -> Dict[str, Any]:
 	}
 
 
-def get_fake_fingerprint() -> Dict[str, str]:
-	"""Tạo fingerprint giả lập"""
-	return {
-		"X-Client-Data": "CJW2yQEIpLbJAQjBtskBCKmdygE=",
-		"X-Goog-Api-Key": "AIzaSyBvQZgjXvJ8QJ8QJ8QJ8QJ8QJ8QJ8QJ8QJ8",
-		"X-Goog-AuthUser": "0",
-		"X-Goog-PageId": str(random.randint(1000000, 9999999)),
-		"X-Goog-Request-Id": str(uuid.uuid4()),
-		"X-Goog-User-Project": "labs-ai-sandbox",
-		"X-Origin": "https://labs.google",
-		"X-Referer": "https://labs.google/",
-		"X-Requested-With": "XMLHttpRequest"
-	}
 
 
 def add_random_delay(min_delay: float = 0.1, max_delay: float = 0.5) -> None:
@@ -216,22 +203,11 @@ def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optiona
 			
 			# Nếu là lỗi khác hoặc đã hết số lần thử, raise exception
 			if attempt == max_retries - 1:
-				print(f"Request URL: {url}")
+				print(f"API Request failed after {max_retries} attempts")
 				print(f"Request Headers: {dict(session.headers)}")
 			raise
 
 
-def http_download(url: str, output_path: str, proxy: Optional[Dict[str, str]] = None) -> None:
-	headers = get_browser_headers()
-	session = requests.Session()
-	session.headers.update(headers)
-	
-	with session.get(url, stream=True, timeout=120, proxies=proxy) as r:
-		r.raise_for_status()
-		with open(output_path, "wb") as f:
-			for chunk in r.iter_content(chunk_size=1024 * 1024):
-				if chunk:
-					f.write(chunk)
 
 
 def http_download_mp4(url: str, output_path: str, proxy: Optional[Dict[str, str]] = None) -> None:
@@ -1365,10 +1341,6 @@ def main():
 
 
 # === UTILITY FUNCTIONS ===
-def ensure_dir(path):
-    """Ensure directory exists"""
-    if not os.path.exists(path):
-        os.makedirs(path)
 
 def center_line(text, width=70):
     """Center text within given width"""
