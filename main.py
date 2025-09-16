@@ -625,6 +625,10 @@ class VideoProcessingThread(QThread):
         """Xử lý một video đơn lẻ với auto account rotation"""
         stt, prompt, image_path = prompt_data
         
+        print(f"DEBUG: STT {stt} - Processing video")
+        print(f"DEBUG: STT {stt} - Image path: {image_path}")
+        print(f"DEBUG: STT {stt} - Image exists: {image_path and os.path.exists(image_path) if image_path else False}")
+        
         try:
             # Lấy tài khoản tiếp theo để xoay vòng
             account_data = self.get_next_account()
@@ -648,23 +652,37 @@ class VideoProcessingThread(QThread):
             output_filename = create_short_filename(stt, prompt)
             output_path = os.path.join(self.config["output_dir"], output_filename)
             
-            # Generate video
+            # Generate video - Auto-select model based on image presence and aspect ratio
             if image_path and os.path.exists(image_path):
+                print("Vào video rồi nè cu hề")
+                # Image-to-video: Select model based on aspect ratio
+                if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
+                    model_key = "veo_3_i2v_s_fast_portrait_ultra"
+                else:  # LANDSCAPE
+                    model_key = "veo_3_i2v_s_fast_ultra"
+                    
                 self.status_updated.emit(f"STT {stt}: 📤 Uploading image...")
                 media_id = upload_image(token, image_path)
                 self.status_updated.emit(f"STT {stt}: 🎬 Generating video from image...")
                 gen_resp, scene_id = generate_video_from_image(
                     token, prompt, media_id, 
                     self.config["project_id"], 
-                    self.config["model_key"],
+                    model_key,
                     self.config["aspect_ratio"]
                 )
             else:
+                print("Vào text rồi nè cu hề")
+                # Text-to-video: Select model based on aspect ratio
+                if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
+                    model_key = "veo_3_0_t2v_fast_portrait_ultra"
+                else:  # LANDSCAPE
+                    model_key = "veo_3_0_t2v_fast_ultra"
+                    
                 self.status_updated.emit(f"STT {stt}: 🎬 Generating video...")
                 gen_resp, scene_id = generate_video(
                     token, prompt, 
                     self.config["project_id"], 
-                    self.config["model_key"],
+                    model_key,
                     self.config["aspect_ratio"]
                 )
             
@@ -1898,11 +1916,11 @@ class MainWindow(QMainWindow):
                 prompt_item.setTextAlignment(Qt.AlignLeft)
                 self.excel_table.setItem(i, 1, prompt_item)
                 
-                # IMAGE
+                # IMAGE - Lưu đường dẫn đầy đủ thay vì chỉ tên file
                 image_display = "None"
                 if image_path:
                     if os.path.exists(image_path):
-                        image_display = os.path.basename(image_path)
+                        image_display = image_path  # Lưu đường dẫn đầy đủ
                     else:
                         image_display = "❌ Not found"
                         
@@ -2012,9 +2030,12 @@ class MainWindow(QMainWindow):
                 
                 # Get image path if exists
                 if image_item and image_item.text() not in ["None", "❌ Not found"]:
-                    # Reconstruct full path from Excel file directory
-                    excel_dir = os.path.dirname(self.excel_path_edit.text())
-                    image_path = os.path.join(excel_dir, image_item.text())
+                    # Use full path directly from table (already stored as full path)
+                    image_path = image_item.text()
+                    print(f"DEBUG: STT {stt} - Image path: {image_path}")
+                    print(f"DEBUG: STT {stt} - Image exists: {os.path.exists(image_path)}")
+                else:
+                    print(f"DEBUG: STT {stt} - No image or image not found")
                     
                 prompts.append((stt, prompt, image_path))
                 
@@ -2027,18 +2048,15 @@ class MainWindow(QMainWindow):
         if not output_dir:
             output_dir = "output"  # Default folder
             
-        # Get aspect ratio from combo box and auto-select model
+        # Get aspect ratio from combo box
         aspect_ratio_text = self.aspect_ratio_combo.currentText()
         if aspect_ratio_text == "9:16":
             aspect_ratio = "VIDEO_ASPECT_RATIO_PORTRAIT"
-            model_key = "veo_3_0_t2v_fast_portrait_ultra"
         else:  # "16:9" or default
             aspect_ratio = "VIDEO_ASPECT_RATIO_LANDSCAPE"
-            model_key = "veo_3_0_t2v_fast_ultra"
             
         config = {
             "project_id": self.project_id_edit.text(),
-            "model_key": model_key,
             "seed": self.seed_spin.value(),
             "max_workers": self.max_workers_spin.value(),
             "output_dir": output_dir,
