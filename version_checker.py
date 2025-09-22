@@ -11,7 +11,7 @@ from packaging import version
 CURRENT_VERSION = "1.0.0"  # 👉 Cập nhật version tại đây
 REQUEST_TIMEOUT = 5
 UPDATER_SCRIPT = "updater.py"
-MAIN_APP = "MakeVideoAI.exe"
+MAIN_APP = "Veo3AI.exe"
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def _show_update_prompt(latest_version, changelog, download_url):
     msg = QMessageBox()
     msg.setIcon(QMessageBox.Information)
     msg.setWindowTitle(f"🔔 Cập nhật mới ({latest_version})")
-    msg.setText(f"<b>Motion Video Pro</b> đã có bản mới <b>{latest_version}</b>!")
+    msg.setText(f"<b>Veo3 AI Pro</b> đã có bản mới <b>{latest_version}</b>!")
     msg.setInformativeText("Bạn có muốn tải bản mới không?")
     msg.setDetailedText(changelog)
     msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)

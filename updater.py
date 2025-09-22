@@ -11,7 +11,7 @@ import platform
 # Constants
 DOWNLOAD_TIMEOUT = 15
 APP_STARTUP_DELAY = 2
-MAIN_APP_NAME = "MotionApp.exe"
+MAIN_APP_NAME = "Veo3AI.exe"
 
 # Configure logging
 logging.basicConfig(

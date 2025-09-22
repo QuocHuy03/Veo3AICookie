@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import re
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, 
@@ -9,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
                              QTableWidget, QTableWidgetItem, QLabel, QLineEdit, 
                              QTextEdit, QComboBox, QSpinBox, QFileDialog, QMessageBox,
                              QDialog, QFormLayout, QGroupBox,
-                             QProgressBar, QCheckBox, QFrame, QHeaderView)
+                             QProgressBar, QCheckBox, QFrame)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont
 import pandas as pd
@@ -49,8 +50,10 @@ class ProcessingResultDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Kết quả xử lý Video")
         self.setModal(True)
-        self.resize(500, 400)
+        self.resize(600, 500)
         
+        self.results = results
+        self.parent_window = parent
         successful = [r for r in results if r[2]]
         failed = [r for r in results if not r[2]]
         
@@ -186,6 +189,26 @@ class ProcessingResultDialog(QDialog):
         
         # Buttons
         button_layout = QHBoxLayout()
+        
+        # Nút Chạy lại cho các video thất bại
+        if len(failed) > 0:
+            self.retry_btn = QPushButton(f"🔄 Chạy lại {len(failed)} video thất bại")
+            self.retry_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ffc107;
+                    color: #212529;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #e0a800;
+                }
+            """)
+            self.retry_btn.clicked.connect(self.retry_failed_videos)
+            button_layout.addWidget(self.retry_btn)
+        
         button_layout.addStretch()
         
         self.close_btn = QPushButton("Đóng")
@@ -216,6 +239,31 @@ class ProcessingResultDialog(QDialog):
                 border-radius: 10px;
             }
         """)
+    
+    def retry_failed_videos(self):
+        """Chạy lại các video thất bại"""
+        failed_videos = [r for r in self.results if not r[2]]
+        
+        if not failed_videos:
+            create_styled_messagebox(self, "Thông báo", "Không có video nào thất bại để chạy lại!", QMessageBox.Information).exec_()
+            return
+        
+        # Xác nhận với người dùng
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Xác nhận")
+        msg.setText(f"Bạn có chắc chắn muốn chạy lại {len(failed_videos)} video thất bại?")
+        msg.setInformativeText("Hệ thống sẽ sử dụng cùng cấu hình và tài khoản để xử lý lại.")
+        msg.setIcon(QMessageBox.Question)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
+        
+        if msg.exec_() == QMessageBox.Yes:
+            # Đóng dialog hiện tại
+            self.accept()
+            
+            # Gọi hàm retry từ parent window
+            if self.parent_window and hasattr(self.parent_window, 'retry_failed_videos'):
+                self.parent_window.retry_failed_videos(failed_videos)
 
 class VideoMergeThread(QThread):
     """Thread để ghép video không block UI"""
@@ -383,161 +431,6 @@ class VideoMergeThread(QThread):
                 
                 self.log_updated.emit(f"❌ Lỗi ghép video: {meaningful_error[:200]}...")
                 self.finished.emit(False, f"Lỗi ghép video:\n{meaningful_error}")
-                
-        except FileNotFoundError:
-            self.log_updated.emit("❌ Không tìm thấy FFmpeg!")
-            self.finished.emit(False, "Không tìm thấy FFmpeg! Vui lòng cài đặt FFmpeg.")
-        except Exception as e:
-            error_msg = str(e) if e else "Lỗi không xác định"
-            self.log_updated.emit(f"❌ Lỗi: {error_msg}")
-            self.finished.emit(False, f"Lỗi: {error_msg}")
-
-class VideoAudioMergeThread(QThread):
-    """Thread để ghép video với audio không block UI"""
-    progress_updated = pyqtSignal(int, str)  # progress, message
-    log_updated = pyqtSignal(str)  # log message
-    finished = pyqtSignal(bool, str)  # success, message
-    
-    def __init__(self, video_path, audio_path, output_path, sync_option, loop_video=False):
-        super().__init__()
-        self.video_path = video_path
-        self.audio_path = audio_path
-        self.output_path = output_path
-        self.sync_option = sync_option
-        self.loop_video = loop_video
-        
-    def _get_media_duration(self, file_path):
-        """Lấy thời lượng của file media"""
-        import subprocess
-        import platform
-        
-        startupinfo = None
-        if platform.system() == "Windows":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-        
-        try:
-            cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", file_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-            
-            if result.returncode == 0 and result.stdout.strip():
-                return float(result.stdout.strip())
-            return None
-        except:
-            return None
-        
-    def run(self):
-        try:
-            self.log_updated.emit(f"🚀 Bắt đầu ghép video với audio...")
-            self.progress_updated.emit(10, "Đang chuẩn bị...")
-            
-            # Validate files exist
-            if not os.path.exists(self.video_path):
-                self.log_updated.emit(f"❌ Video không tồn tại: {self.video_path}")
-                self.finished.emit(False, f"Video không tồn tại: {self.video_path}")
-                return
-                
-            if not os.path.exists(self.audio_path):
-                self.log_updated.emit(f"❌ Audio không tồn tại: {self.audio_path}")
-                self.finished.emit(False, f"Audio không tồn tại: {self.audio_path}")
-                return
-            
-            self.log_updated.emit("✅ Cả video và audio files hợp lệ")
-            self.progress_updated.emit(20, "Đang phân tích thời lượng...")
-            
-            # Get durations
-            video_duration = self._get_media_duration(self.video_path)
-            audio_duration = self._get_media_duration(self.audio_path)
-            
-            if video_duration is None:
-                self.log_updated.emit("⚠️ Không thể lấy thời lượng video")
-            else:
-                self.log_updated.emit(f"📹 Video duration: {video_duration:.2f}s")
-                
-            if audio_duration is None:
-                self.log_updated.emit("⚠️ Không thể lấy thời lượng audio")
-            else:
-                self.log_updated.emit(f"🎵 Audio duration: {audio_duration:.2f}s")
-            
-            self.progress_updated.emit(30, "Đang xây dựng FFmpeg command...")
-            
-            # Build FFmpeg command based on sync option
-            cmd = ["ffmpeg", "-y"]  # -y để overwrite output file
-            
-            if self.sync_option == "Video theo audio (kéo dài/cắt ngắn video)":
-                # Video sẽ được điều chỉnh theo audio
-                if self.loop_video and video_duration and audio_duration and video_duration < audio_duration:
-                    # Loop video nếu ngắn hơn audio
-                    self.log_updated.emit("🔄 Video sẽ được lặp để khớp với audio")
-                    cmd.extend(["-stream_loop", "-1", "-i", self.video_path])
-                else:
-                    cmd.extend(["-i", self.video_path])
-                cmd.extend(["-i", self.audio_path])
-                
-                # Video filter để điều chỉnh theo audio
-                cmd.extend(["-filter_complex", "[0:v]scale=1920:1080[v]"])
-                cmd.extend(["-map", "[v]", "-map", "1:a"])
-                cmd.extend(["-shortest"])  # Kết thúc khi audio kết thúc
-                
-            elif self.sync_option == "Audio theo video (kéo dài/cắt ngắn audio)":
-                # Audio sẽ được điều chỉnh theo video
-                cmd.extend(["-i", self.video_path])
-                cmd.extend(["-i", self.audio_path])
-                cmd.extend(["-filter_complex", "[1:a]volume=1.0[a]"])
-                cmd.extend(["-map", "0:v", "-map", "[a]"])
-                cmd.extend(["-shortest"])  # Kết thúc khi video kết thúc
-                
-            else:  # "Cắt video theo audio"
-                # Cắt video theo độ dài audio
-                cmd.extend(["-i", self.video_path])
-                cmd.extend(["-i", self.audio_path])
-                cmd.extend(["-filter_complex", "[0:v]scale=1920:1080[v]"])
-                cmd.extend(["-map", "[v]", "-map", "1:a"])
-                if audio_duration:
-                    cmd.extend(["-t", str(audio_duration)])  # Cắt theo thời lượng audio
-            
-            # Output settings
-            cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
-            cmd.extend(["-c:a", "aac", "-b:a", "128k"])
-            cmd.append(self.output_path)
-            
-            self.log_updated.emit("📝 Command: ********************************")
-            self.progress_updated.emit(40, "Đang ghép video với audio...")
-            
-            # Execute FFmpeg
-            import subprocess
-            import platform
-            
-            startupinfo = None
-            if platform.system() == "Windows":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-            
-            if result.returncode == 0:
-                self.progress_updated.emit(100, "Hoàn thành!")
-                self.log_updated.emit("✅ Ghép video với audio thành công!")
-                self.finished.emit(True, f"Đã ghép video với audio thành công!\nFile: {self.output_path}")
-            else:
-                # Extract meaningful error from FFmpeg output
-                stderr_text = result.stderr if result.stderr else ""
-                stdout_text = result.stdout if result.stdout else ""
-                
-                error_lines = stderr_text.split('\n') if stderr_text else []
-                meaningful_error = ""
-                
-                for line in error_lines:
-                    if any(keyword in line.lower() for keyword in ['error', 'failed', 'invalid', 'cannot']):
-                        meaningful_error += line + "\n"
-                
-                if not meaningful_error:
-                    meaningful_error = stderr_text[:300] + "..." if stderr_text else "Lỗi không xác định từ FFmpeg"
-                
-                self.log_updated.emit(f"❌ Lỗi ghép video với audio: {meaningful_error[:200]}...")
-                self.finished.emit(False, f"Lỗi ghép video với audio:\n{meaningful_error}")
                 
         except FileNotFoundError:
             self.log_updated.emit("❌ Không tìm thấy FFmpeg!")
@@ -837,6 +730,53 @@ class VideoProcessingThread(QThread):
         self.total_count = len(prompts)
         self.current_account_index = 0  # For account rotation
         
+        # Tối ưu hóa: Chia đều prompts cho các tài khoản
+        self.account_prompts_distribution = self.distribute_prompts_to_accounts()
+        
+        # Tối ưu: Connection pooling và timeout settings
+        self.session_config = {
+            'timeout': (10, 30),  # Connect timeout, read timeout
+            'max_retries': 3,
+            'backoff_factor': 0.3
+        }
+        
+    def distribute_prompts_to_accounts(self):
+        """Chia đều prompts cho các tài khoản để tối ưu hóa"""
+        if not self.accounts_data or not self.prompts:
+            return {}
+        
+        account_count = len(self.accounts_data)
+        prompt_count = len(self.prompts)
+        
+        # Tối ưu: Sử dụng generator để tiết kiệm memory
+        prompts_per_account = prompt_count // account_count
+        remaining_prompts = prompt_count % account_count
+        
+        distribution = {}
+        start_index = 0
+        
+        for i, account in enumerate(self.accounts_data):
+            account_name = account.get("name", f"Account {i+1}")
+            
+            # Tài khoản đầu tiên sẽ nhận thêm các prompts còn lại
+            prompts_for_this_account = prompts_per_account + (1 if i < remaining_prompts else 0)
+            
+            end_index = start_index + prompts_for_this_account
+            # Tối ưu: Chỉ lưu indices thay vì copy toàn bộ data
+            account_prompts = self.prompts[start_index:end_index]
+            
+            distribution[account_name] = {
+                'account': account,
+                'prompts': account_prompts,
+                'count': len(account_prompts),
+                'start_idx': start_index,
+                'end_idx': end_index
+            }
+            
+            start_index = end_index
+        
+        return distribution
+        
     def get_next_account(self):
         """Lấy tài khoản tiếp theo để xoay vòng"""
         if not self.accounts_data:
@@ -941,21 +881,146 @@ class VideoProcessingThread(QThread):
             self.status_updated.emit(f"STT {stt}: ❌ Lỗi: {str(e)}")
             return (stt, prompt, False, str(e))
     
+    def process_video_with_specific_account(self, prompt_data, account_data):
+        """Xử lý video với tài khoản cụ thể (cho thuật toán chia tải tối ưu)"""
+        stt, prompt, image_path = prompt_data
+        account_name = account_data.get("name", "Unknown")
+        
+        try:
+            # Lấy token từ cookie của tài khoản được chỉ định
+            cookie_header_value = account_data["cookie"]
+            
+            # Kiểm tra cookie có hợp lệ không
+            if not cookie_header_value or cookie_header_value.startswith("YOUR_COOKIE_HERE"):
+                return (stt, prompt, False, f"Cookie không hợp lệ cho {account_name}")
+            
+            # Tối ưu: Cache token để tránh gọi API nhiều lần
+            cache_key = f"token_{hash(cookie_header_value)}"
+            if not hasattr(self, 'token_cache'):
+                self.token_cache = {}
+            
+            token = self.token_cache.get(cache_key)
+            if not token:
+                token = fetch_access_token_from_session(cookie_header_value)
+                if token:
+                    self.token_cache[cache_key] = token
+                else:
+                    return (stt, prompt, False, f"Không thể lấy token từ {account_name} - Cookie có thể đã hết hạn")
+            
+            # Tạo output filename
+            output_filename = create_short_filename(stt, prompt)
+            output_path = os.path.join(self.config["output_dir"], output_filename)
+            
+            # Generate video - Auto-select model based on image presence
+            if image_path and os.path.exists(image_path):
+                # Image-to-video: Select model based on aspect ratio
+                if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
+                    model_key = "veo_3_i2v_s_fast_portrait_ultra"
+                else:  # LANDSCAPE
+                    model_key = "veo_3_i2v_s_fast_ultra"
+                    
+                self.status_updated.emit(f"STT {stt}: 📤 Uploading image với {account_name}...")
+                media_id = upload_image(token, image_path)
+                self.status_updated.emit(f"STT {stt}: 🎬 Generating video from image với {account_name}...")
+                gen_resp, scene_id = generate_video_from_image(
+                    token, prompt, media_id, 
+                    self.config["project_id"], 
+                    model_key,
+                    self.config["aspect_ratio"]
+                )
+            else:
+                # Text-to-video: Select model based on aspect ratio
+                if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
+                    model_key = "veo_3_0_t2v_fast_portrait_ultra"
+                else:  # LANDSCAPE
+                    model_key = "veo_3_0_t2v_fast_ultra"
+                    
+                self.status_updated.emit(f"STT {stt}: 🎬 Generating video với {account_name}...")
+                gen_resp, scene_id = generate_video(
+                    token, prompt, 
+                    self.config["project_id"], 
+                    model_key,
+                    self.config["aspect_ratio"]
+                )
+            
+            # Poll status với retry logic tối ưu
+            op_name = extract_op_name(gen_resp)
+            self.status_updated.emit(f"STT {stt}: ⏳ Checking generation status với {account_name}...")
+            
+            # Tối ưu: Retry với exponential backoff
+            max_retries = 3
+            base_delay = 2.0
+            for attempt in range(max_retries):
+                try:
+                    status_resp = poll_status(token, op_name, scene_id, interval_sec=base_delay, timeout_sec=300)
+                    self.status_updated.emit(f"STT {stt}: ✅ Status: SUCCESSFUL với {account_name} - đang tải...")
+                    break
+                except RuntimeError as e:
+                    if attempt == max_retries - 1:
+                        self.status_updated.emit(f"STT {stt}: ❌ Status: FAILED với {account_name}!")
+                        return (stt, prompt, False, f"Generation failed: {str(e)}")
+                    else:
+                        self.status_updated.emit(f"STT {stt}: ⚠️ Retry {attempt + 1}/{max_retries} với {account_name}...")
+                        time.sleep(base_delay * (2 ** attempt))  # Exponential backoff
+                except TimeoutError as e:
+                    if attempt == max_retries - 1:
+                        self.status_updated.emit(f"STT {stt}: ⏰ Timeout với {account_name}!")
+                        return (stt, prompt, False, f"Timeout: {str(e)}")
+                    else:
+                        self.status_updated.emit(f"STT {stt}: ⚠️ Timeout, retry {attempt + 1}/{max_retries} với {account_name}...")
+                        time.sleep(base_delay * (2 ** attempt))
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        self.status_updated.emit(f"STT {stt}: ❌ Lỗi polling với {account_name}: {str(e)}")
+                        return (stt, prompt, False, f"Polling error: {str(e)}")
+                    else:
+                        self.status_updated.emit(f"STT {stt}: ⚠️ Lỗi polling, retry {attempt + 1}/{max_retries} với {account_name}...")
+                        time.sleep(base_delay * (2 ** attempt))
+            
+            # Download video
+            self.status_updated.emit(f"STT {stt}: 📥 Downloading video từ {account_name}...")
+            fife_url = extract_fife_url(status_resp)
+            http_download_mp4(fife_url, output_path)
+            
+            self.status_updated.emit(f"STT {stt}: ✅ Hoàn thành với {account_name}: {output_filename}")
+            return (stt, prompt, True, output_filename)
+            
+        except Exception as e:
+            self.status_updated.emit(f"STT {stt}: ❌ Lỗi với {account_name}: {str(e)}")
+            return (stt, prompt, False, str(e))
+    
     def run(self):
         try:
             account_count = len(self.accounts_data)
-            self.progress_updated.emit(5, f"🚀 Bắt đầu xử lý {self.total_count} video với {self.max_workers} luồng và {account_count} tài khoản...")
             
-            # Sử dụng ThreadPoolExecutor để xử lý parallel
+            # Hiển thị thông tin chia tải
+            distribution_info = []
+            for account_name, data in self.account_prompts_distribution.items():
+                distribution_info.append(f"{account_name}: {data['count']} prompts")
+            
+            distribution_text = " | ".join(distribution_info)
+            self.progress_updated.emit(5, f"🚀 Bắt đầu xử lý {self.total_count} video với {self.max_workers} luồng và {account_count} tài khoản...")
+            self.progress_updated.emit(8, f"📊 Chia tải: {distribution_text}")
+            
+            # Sử dụng ThreadPoolExecutor để xử lý parallel với chia tải tối ưu
             results = []
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit tất cả tasks
-                future_to_prompt = {
-                    executor.submit(self.process_single_video, prompt_data): prompt_data 
-                    for prompt_data in self.prompts
-                }
+                # Tạo tasks với account distribution
+                future_to_prompt = {}
                 
-                # Xử lý kết quả khi hoàn thành
+                for account_name, data in self.account_prompts_distribution.items():
+                    account_data = data['account']
+                    prompts = data['prompts']
+                    
+                    # Submit tasks cho từng account
+                    for prompt_data in prompts:
+                        future = executor.submit(self.process_video_with_specific_account, prompt_data, account_data)
+                        future_to_prompt[future] = prompt_data
+                
+                # Xử lý kết quả khi hoàn thành với batch processing
+                batch_size = max(1, self.total_count // 20)  # Update mỗi 5%
+                batch_count = 0
+                
                 for future in as_completed(future_to_prompt):
                     prompt_data = future_to_prompt[future]
                     stt, prompt, image_path = prompt_data
@@ -964,33 +1029,51 @@ class VideoProcessingThread(QThread):
                         result = future.result()
                         results.append(result)
                         self.processed_count += 1
+                        batch_count += 1
                         
-                        # Cập nhật progress
-                        progress = int(5 + (self.processed_count / self.total_count) * 90)
-                        status = "✓" if result[2] else "❌"
-                        self.progress_updated.emit(
-                            progress, 
-                            f"{status} STT {stt}: {prompt[:30]}... ({self.processed_count}/{self.total_count})"
-                        )
+                        # Tối ưu: Chỉ update progress mỗi batch để tránh lag UI
+                        if batch_count >= batch_size or self.processed_count == self.total_count:
+                            progress = int(10 + (self.processed_count / self.total_count) * 85)
+                            status = "✓" if result[2] else "❌"
+                            self.progress_updated.emit(
+                                progress, 
+                                f"{status} STT {stt}: {prompt[:30]}... ({self.processed_count}/{self.total_count})"
+                            )
+                            batch_count = 0
                         
                     except Exception as e:
                         results.append((stt, prompt, False, str(e)))
                         self.processed_count += 1
+                        batch_count += 1
                         
             # Sắp xếp results theo STT
             results.sort(key=lambda x: x[0])
             
-            self.progress_updated.emit(100, f"✅ Hoàn thành! Đã xử lý {len(results)} video")
+            # Thống kê kết quả
+            successful = sum(1 for r in results if r[2])
+            failed = len(results) - successful
+            
+            self.progress_updated.emit(100, f"✅ Hoàn thành! Thành công: {successful}/{len(results)} video")
+            if failed > 0:
+                self.progress_updated.emit(100, f"⚠️ Có {failed} video thất bại")
+            
             self.finished.emit(results)
             
         except Exception as e:
             self.progress_updated.emit(0, f"❌ Lỗi: {str(e)}")
             self.finished.emit([])
+        finally:
+            # Tối ưu: Cleanup resources
+            if hasattr(self, 'token_cache'):
+                self.token_cache.clear()
+            self.account_prompts_distribution.clear()
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.accounts = []  # Danh sách tài khoản
+        self.processing_thread = None  # Thread xử lý video
+        self.is_processing = False  # Trạng thái đang xử lý
         self.init_ui()
         self.load_accounts()
         
@@ -1017,12 +1100,6 @@ class MainWindow(QMainWindow):
         
         # Tab 3: Ghép video
         self.create_merge_tab()
-        
-        # Tab 4: Trích xuất links
-        self.create_path_extraction_tab()
-        
-        # Tab 5: Ghép video với audio
-        self.create_audio_merge_tab()
         
     def create_account_tab(self):
         """Tab 1: Quản lý tài khoản"""
@@ -1458,8 +1535,10 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        stop_btn = QPushButton("⏹️ Dừng")
-        stop_btn.setStyleSheet("""
+        self.stop_btn = QPushButton("⏹️ Dừng")
+        self.stop_btn.clicked.connect(self.stop_processing)
+        self.stop_btn.setEnabled(False)  # Disabled by default
+        self.stop_btn.setStyleSheet("""
             QPushButton {
                 background-color: #f44336;
                 color: white;
@@ -1472,10 +1551,13 @@ class MainWindow(QMainWindow):
             QPushButton:hover {
                 background-color: #d32f2f;
             }
+            QPushButton:disabled {
+                background-color: #ccc;
+            }
         """)
         
         control_layout.addWidget(self.start_btn)
-        control_layout.addWidget(stop_btn)
+        control_layout.addWidget(self.stop_btn)
         control_layout.addStretch()
         control_group.setLayout(control_layout)
         right_layout.addWidget(control_group)
@@ -1802,930 +1884,6 @@ class MainWindow(QMainWindow):
         tab.setLayout(main_layout)
         self.tab_widget.addTab(tab, "Ghép Video")
         
-    def create_path_extraction_tab(self):
-        """Tab 4: Trích xuất đường dẫn và tạo link"""
-        tab = QWidget()
-        layout = QVBoxLayout()
-        
-        # Main layout với tỷ lệ cân đối
-        main_layout = QHBoxLayout()
-        
-        # Left panel - Folder selection và controls (40%)
-        left_panel = QWidget()
-        left_layout = QVBoxLayout()
-        
-        # Group: Chọn thư mục
-        folder_group = QGroupBox("Chọn Thư Mục")
-        folder_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        folder_layout = QVBoxLayout()
-        
-        # Folder selection buttons
-        button_layout = QHBoxLayout()
-        
-        self.select_folder_btn = QPushButton("📁 Chọn Thư Mục")
-        self.select_folder_btn.clicked.connect(self.select_folder)
-        self.select_folder_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        button_layout.addWidget(self.select_folder_btn)
-        
-        self.scan_btn = QPushButton("🔍 Quét Files")
-        self.scan_btn.clicked.connect(self.scan_files)
-        self.scan_btn.setEnabled(False)
-        self.scan_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-            QPushButton:disabled {
-                background-color: #ccc;
-                color: #666;
-            }
-        """)
-        button_layout.addWidget(self.scan_btn)
-        
-        folder_layout.addLayout(button_layout)
-        
-        # Selected folder display
-        self.folder_path_label = QLabel("Chưa chọn thư mục")
-        self.folder_path_label.setStyleSheet("""
-            QLabel {
-                color: #666;
-                font-size: 12px;
-                padding: 8px;
-                background-color: #f5f5f5;
-                border-radius: 5px;
-                border: 1px solid #ddd;
-            }
-        """)
-        folder_layout.addWidget(self.folder_path_label)
-        
-        folder_group.setLayout(folder_layout)
-        left_layout.addWidget(folder_group)
-        
-        # Group: Regex Pattern
-        regex_group = QGroupBox("Regex Pattern")
-        regex_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        regex_layout = QVBoxLayout()
-        
-        # Regex input
-        self.regex_edit = QLineEdit(r".*\.(jpg|jpeg|png|gif|mp4|avi|mov|mkv)$")
-        self.regex_edit.setPlaceholderText("Nhập regex pattern để lọc files...")
-        self.regex_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 8px;
-                border: 2px solid #e0e0e0;
-                border-radius: 5px;
-                background-color: white;
-                font-size: 12px;
-                color: #333;
-            }
-            QLineEdit:focus {
-                border-color: #2196F3;
-            }
-        """)
-        regex_layout.addWidget(QLabel("Pattern:"))
-        regex_layout.addWidget(self.regex_edit)
-        
-        # Link generation options - simplified
-        self.export_format_combo = QComboBox()
-        self.export_format_combo.addItems([
-            "Đường dẫn đầy đủ",
-            "Đường dẫn tương đối", 
-            "Chỉ tên file"
-        ])
-        self.export_format_combo.setStyleSheet("""
-            QComboBox {
-                padding: 8px;
-                border: 2px solid #e0e0e0;
-                border-radius: 5px;
-                background-color: white;
-                font-size: 12px;
-                color: #333;
-            }
-            QComboBox:focus {
-                border-color: #2196F3;
-            }
-        """)
-        regex_layout.addWidget(QLabel("Định dạng xuất:"))
-        regex_layout.addWidget(self.export_format_combo)
-        
-        regex_group.setLayout(regex_layout)
-        left_layout.addWidget(regex_group)
-        
-        # Generate paths button
-        self.generate_paths_btn = QPushButton("📋 Tạo Danh Sách")
-        self.generate_paths_btn.clicked.connect(self.generate_paths)
-        self.generate_paths_btn.setEnabled(False)
-        self.generate_paths_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
-            QPushButton:disabled {
-                background-color: #ccc;
-                color: #666;
-            }
-        """)
-        left_layout.addWidget(self.generate_paths_btn)
-        
-        left_layout.addStretch()
-        left_panel.setLayout(left_layout)
-        main_layout.addWidget(left_panel)
-        
-        # Right panel - Results (60%)
-        right_panel = QWidget()
-        right_layout = QVBoxLayout()
-        
-        # Group: File List
-        files_group = QGroupBox("Danh Sách Files")
-        files_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        files_layout = QVBoxLayout()
-        
-        # Files table
-        self.files_table = QTableWidget()
-        self.files_table.setColumnCount(3)
-        self.files_table.setHorizontalHeaderLabels(["STT", "Tên File", "Đường Dẫn"])
-             # Video table properties
-        self.files_table.horizontalHeader().setStretchLastSection(True)
-        self.files_table.setAlternatingRowColors(True)
-        self.files_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.files_table.setSelectionMode(QTableWidget.NoSelection)
-        self.files_table.verticalHeader().setVisible(False)
-        self.files_table.setShowGrid(True)
-        self.files_table.setSortingEnabled(False)  # Không sort để giữ thứ tự
-        self.files_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        
-        # Set column widths
-        self.files_table.verticalHeader().setDefaultSectionSize(40)
-        self.files_table.setStyleSheet("""
-            QTableWidget {
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                background-color: white;
-                gridline-color: #e0e0e0;
-            }
-            QHeaderView::section {
-                background-color: #f5f5f5;
-                padding: 8px;
-                border: none;
-                border-right: 1px solid #ddd;
-                font-weight: bold;
-            }
-        """)
-        files_layout.addWidget(self.files_table)
-        
-        files_group.setLayout(files_layout)
-        right_layout.addWidget(files_group)
-        
-        # Group: Generated Paths
-        paths_group = QGroupBox("Danh Sách Đường Dẫn")
-        paths_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        paths_layout = QVBoxLayout()
-        
-        # Paths text area
-        self.paths_text = QTextEdit()
-        self.paths_text.setPlaceholderText("Danh sách đường dẫn sẽ được hiển thị ở đây...")
-        self.paths_text.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                background-color: white;
-                font-family: "Courier New", monospace;
-                font-size: 11px;
-            }
-        """)
-        paths_layout.addWidget(self.paths_text)
-        
-        # Export buttons
-        button_layout = QHBoxLayout()
-        
-        self.copy_paths_btn = QPushButton("📋 Copy")
-        self.copy_paths_btn.clicked.connect(self.copy_paths)
-        self.copy_paths_btn.setEnabled(False)
-        self.copy_paths_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9C27B0;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #7B1FA2;
-            }
-            QPushButton:disabled {
-                background-color: #ccc;
-                color: #666;
-            }
-        """)
-        button_layout.addWidget(self.copy_paths_btn)
-        
-        self.export_txt_btn = QPushButton("💾 Xuất TXT")
-        self.export_txt_btn.clicked.connect(self.export_to_txt)
-        self.export_txt_btn.setEnabled(False)
-        self.export_txt_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:disabled {
-                background-color: #ccc;
-                color: #666;
-            }
-        """)
-        button_layout.addWidget(self.export_txt_btn)
-        
-        paths_layout.addLayout(button_layout)
-        
-        paths_group.setLayout(paths_layout)
-        right_layout.addWidget(paths_group)
-        
-        right_panel.setLayout(right_layout)
-        main_layout.addWidget(right_panel)
-        
-        tab.setLayout(main_layout)
-        self.tab_widget.addTab(tab, "Trích Xuất Links")
-        
-        # Initialize variables
-        self.selected_folder_path = ""
-        self.scanned_files = []
-        
-    def create_audio_merge_tab(self):
-        """Tab 5: Ghép video với audio"""
-        tab = QWidget()
-        layout = QVBoxLayout()
-        
-        # Main layout với tỷ lệ cân đối
-        main_layout = QHBoxLayout()
-        
-        # Left panel - Controls (40%)
-        left_panel = QWidget()
-        left_layout = QVBoxLayout()
-        
-        # Group: Chọn Video
-        video_group = QGroupBox("Chọn Video")
-        video_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        video_layout = QVBoxLayout()
-        
-        # Video selection button
-        self.select_video_btn = QPushButton("🎬 Chọn Video")
-        self.select_video_btn.clicked.connect(self.select_video_for_audio)
-        self.select_video_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        video_layout.addWidget(self.select_video_btn)
-        
-        # Selected video display
-        self.video_path_label = QLabel("Chưa chọn video")
-        self.video_path_label.setStyleSheet("""
-            QLabel {
-                color: #666;
-                font-size: 12px;
-                padding: 8px;
-                background-color: #f5f5f5;
-                border-radius: 5px;
-                border: 1px solid #ddd;
-            }
-        """)
-        video_layout.addWidget(self.video_path_label)
-        
-        video_group.setLayout(video_layout)
-        left_layout.addWidget(video_group)
-        
-        # Group: Chọn Audio
-        audio_group = QGroupBox("Chọn Audio")
-        audio_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        audio_layout = QVBoxLayout()
-        
-        # Audio selection button
-        self.select_audio_btn = QPushButton("🎵 Chọn Audio")
-        self.select_audio_btn.clicked.connect(self.select_audio_file)
-        self.select_audio_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-        """)
-        audio_layout.addWidget(self.select_audio_btn)
-        
-        # Selected audio display
-        self.audio_path_label = QLabel("Chưa chọn audio")
-        self.audio_path_label.setStyleSheet("""
-            QLabel {
-                color: #666;
-                font-size: 12px;
-                padding: 8px;
-                background-color: #f5f5f5;
-                border-radius: 5px;
-                border: 1px solid #ddd;
-            }
-        """)
-        audio_layout.addWidget(self.audio_path_label)
-        
-        audio_group.setLayout(audio_layout)
-        left_layout.addWidget(audio_group)
-        
-        # Group: Tùy chọn
-        options_group = QGroupBox("Tùy Chọn Ghép")
-        options_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        options_layout = QFormLayout()
-        
-        # Output name
-        self.audio_output_name_edit = QLineEdit("video_with_audio.mp4")
-        self.audio_output_name_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 8px;
-                border: 2px solid #e0e0e0;
-                border-radius: 5px;
-                background-color: white;
-                font-size: 12px;
-                color: #333;
-            }
-        """)
-        options_layout.addRow("Tên file output:", self.audio_output_name_edit)
-        
-        # Audio sync options
-        self.audio_sync_combo = QComboBox()
-        self.audio_sync_combo.addItems([
-            "Video theo audio (kéo dài/cắt ngắn video)",
-            "Audio theo video (kéo dài/cắt ngắn audio)",
-            "Cắt video theo audio"
-        ])
-        self.audio_sync_combo.setStyleSheet("""
-            QComboBox {
-                padding: 8px;
-                border: 2px solid #e0e0e0;
-                border-radius: 5px;
-                background-color: white;
-                font-size: 12px;
-                color: #333;
-            }
-        """)
-        options_layout.addRow("Đồng bộ:", self.audio_sync_combo)
-        
-        # Video loop option
-        self.loop_video_check = QCheckBox("Lặp video nếu ngắn hơn audio")
-        self.loop_video_check.setChecked(True)
-        self.loop_video_check.setStyleSheet("""
-            QCheckBox {
-                font-size: 12px;
-                color: #333;
-                padding: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #FF9800;
-                border: 2px solid #FF9800;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:unchecked {
-                background-color: white;
-                border: 2px solid #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
-        options_layout.addRow("Tùy chọn:", self.loop_video_check)
-        
-        options_group.setLayout(options_layout)
-        left_layout.addWidget(options_group)
-        
-        # Merge button
-        self.audio_merge_btn = QPushButton("🎬 Ghép Video + Audio")
-        self.audio_merge_btn.clicked.connect(self.merge_video_audio)
-        self.audio_merge_btn.setEnabled(False)
-        self.audio_merge_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 5px;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
-            }
-            QPushButton:disabled {
-                background-color: #ccc;
-                color: #666;
-            }
-        """)
-        left_layout.addWidget(self.audio_merge_btn)
-        
-        left_layout.addStretch()
-        left_panel.setLayout(left_layout)
-        main_layout.addWidget(left_panel)
-        
-        # Right panel - Progress và Log (60%)
-        right_panel = QWidget()
-        right_layout = QVBoxLayout()
-        
-        # Group: Tiến độ
-        progress_group = QGroupBox("Tiến độ Ghép")
-        progress_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        progress_layout = QVBoxLayout()
-        
-        self.audio_progress_bar = QProgressBar()
-        self.audio_progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #e0e0e0;
-                border-radius: 5px;
-                text-align: center;
-                background-color: white;
-                height: 25px;
-            }
-            QProgressBar::chunk {
-                background-color: #FF9800;
-                border-radius: 3px;
-            }
-        """)
-        progress_layout.addWidget(self.audio_progress_bar)
-        
-        self.audio_progress_label = QLabel("Sẵn sàng ghép video với audio")
-        self.audio_progress_label.setStyleSheet("""
-            QLabel {
-                color: #666;
-                font-size: 12px;
-            }
-        """)
-        progress_layout.addWidget(self.audio_progress_label)
-        
-        progress_group.setLayout(progress_layout)
-        right_layout.addWidget(progress_group)
-        
-        # Group: Log
-        log_group = QGroupBox("Log Ghép Video + Audio")
-        log_group.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-        log_layout = QVBoxLayout()
-        
-        self.audio_log_text = QTextEdit()
-        self.audio_log_text.setReadOnly(True)
-        self.audio_log_text.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                background-color: #1e1e1e;
-                font-family: "Courier New", monospace;
-                font-size: 11px;
-                color: #ffffff;
-            }
-        """)
-        log_layout.addWidget(self.audio_log_text)
-        
-        log_group.setLayout(log_layout)
-        right_layout.addWidget(log_group)
-        
-        right_panel.setLayout(right_layout)
-        main_layout.addWidget(right_panel)
-        
-        tab.setLayout(main_layout)
-        self.tab_widget.addTab(tab, "Ghép Video + Audio")
-        
-        # Initialize variables
-        self.selected_video_path = ""
-        self.selected_audio_path = ""
-        
-    def select_video_for_audio(self):
-        """Chọn video để ghép với audio"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn video file",
-            "",
-            "Video Files (*.mp4 *.avi *.mov *.mkv *.flv *.wmv);;All Files (*)"
-        )
-        
-        if file_path:
-            self.selected_video_path = file_path
-            self.video_path_label.setText(f"🎬 {os.path.basename(file_path)}")
-            self.video_path_label.setStyleSheet("""
-                QLabel {
-                    color: #2E7D32;
-                    font-size: 12px;
-                    padding: 8px;
-                    background-color: #E8F5E8;
-                    border-radius: 5px;
-                    border: 1px solid #4CAF50;
-                }
-            """)
-            self.check_audio_merge_ready()
-    
-    def select_audio_file(self):
-        """Chọn audio file để ghép với video"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn audio file",
-            "",
-            "Audio Files (*.mp3 *.wav *.aac *.flac *.ogg);;All Files (*)"
-        )
-        
-        if file_path:
-            self.selected_audio_path = file_path
-            self.audio_path_label.setText(f"🎵 {os.path.basename(file_path)}")
-            self.audio_path_label.setStyleSheet("""
-                QLabel {
-                    color: #1976D2;
-                    font-size: 12px;
-                    padding: 8px;
-                    background-color: #E3F2FD;
-                    border-radius: 5px;
-                    border: 1px solid #2196F3;
-                }
-            """)
-            self.check_audio_merge_ready()
-    
-    def check_audio_merge_ready(self):
-        """Kiểm tra xem đã sẵn sàng ghép chưa"""
-        if self.selected_video_path and self.selected_audio_path:
-            self.audio_merge_btn.setEnabled(True)
-        else:
-            self.audio_merge_btn.setEnabled(False)
-    
-    def merge_video_audio(self):
-        """Ghép video với audio"""
-        if not self.selected_video_path or not self.selected_audio_path:
-            create_styled_messagebox(self, "Lỗi", "Vui lòng chọn cả video và audio!", QMessageBox.Warning).exec_()
-            return
-            
-        # Output path
-        output_name = self.audio_output_name_edit.text()
-        if not output_name.endswith('.mp4'):
-            output_name += '.mp4'
-            
-        output_path = os.path.join(os.path.dirname(self.selected_video_path), output_name)
-        
-        # Get sync option
-        sync_option = self.audio_sync_combo.currentText()
-        loop_video = self.loop_video_check.isChecked()
-        
-        # Disable merge button và clear log
-        self.audio_merge_btn.setEnabled(False)
-        self.audio_progress_bar.setValue(0)
-        self.audio_log_text.clear()
-        
-        # Start merge thread
-        self.audio_merge_thread = VideoAudioMergeThread(
-            self.selected_video_path, 
-            self.selected_audio_path, 
-            output_path, 
-            sync_option, 
-            loop_video
-        )
-        self.audio_merge_thread.progress_updated.connect(self.on_audio_merge_progress_updated)
-        self.audio_merge_thread.log_updated.connect(self.on_audio_merge_log_updated)
-        self.audio_merge_thread.finished.connect(self.on_audio_merge_finished)
-        self.audio_merge_thread.start()
-        
-    def on_audio_merge_progress_updated(self, progress, message):
-        """Update audio merge progress"""
-        self.audio_progress_bar.setValue(progress)
-        self.audio_progress_label.setText(message)
-        
-    def on_audio_merge_log_updated(self, message):
-        """Update audio merge log"""
-        self.audio_log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-        self.audio_log_text.ensureCursorVisible()
-        
-    def on_audio_merge_finished(self, success, message):
-        """Khi ghép video + audio hoàn thành"""
-        # Re-enable merge button
-        self.audio_merge_btn.setEnabled(True)
-        
-        if success:
-            create_styled_messagebox(self, "Thành công", message).exec_()
-        else:
-            create_styled_messagebox(self, "Lỗi", message, QMessageBox.Critical).exec_()
-        
-    def select_folder(self):
-        """Chọn thư mục để quét files"""
-        folder_path = QFileDialog.getExistingDirectory(
-            self, 
-            "Chọn thư mục chứa ảnh/video", 
-            "",
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
-        
-        if folder_path:
-            self.selected_folder_path = folder_path
-            self.folder_path_label.setText(f"📁 {folder_path}")
-            self.folder_path_label.setStyleSheet("""
-                QLabel {
-                    color: #2E7D32;
-                    font-size: 12px;
-                    padding: 8px;
-                    background-color: #E8F5E8;
-                    border-radius: 5px;
-                    border: 1px solid #4CAF50;
-                }
-            """)
-            self.scan_btn.setEnabled(True)
-            self.generate_paths_btn.setEnabled(False)
-            self.files_table.setRowCount(0)
-            self.paths_text.clear()
-            self.copy_paths_btn.setEnabled(False)
-            self.export_txt_btn.setEnabled(False)
-    
-    def scan_files(self):
-        """Quét files trong thư mục theo regex pattern"""
-        if not self.selected_folder_path:
-            return
-            
-        try:
-            import re
-            import os
-            
-            pattern = self.regex_edit.text().strip()
-            if not pattern:
-                create_styled_messagebox(self, "Lỗi", "Vui lòng nhập regex pattern!", QMessageBox.Warning).exec_()
-                return
-            
-            # Compile regex pattern
-            try:
-                regex = re.compile(pattern, re.IGNORECASE)
-            except re.error as e:
-                create_styled_messagebox(self, "Lỗi", f"Regex pattern không hợp lệ: {str(e)}", QMessageBox.Critical).exec_()
-                return
-            
-            # Scan files
-            self.scanned_files = []
-            for root, dirs, files in os.walk(self.selected_folder_path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    if regex.match(file):
-                        self.scanned_files.append({
-                            'name': file,
-                            'path': file_path,
-                            'relative_path': os.path.relpath(file_path, self.selected_folder_path)
-                        })
-            
-            # Update table
-            self.files_table.setRowCount(len(self.scanned_files))
-            for i, file_info in enumerate(self.scanned_files):
-                self.files_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                self.files_table.setItem(i, 1, QTableWidgetItem(file_info['name']))
-                self.files_table.setItem(i, 2, QTableWidgetItem(file_info['relative_path']))
-            
-            # Resize columns
-            self.files_table.resizeColumnsToContents()
-            
-            # Enable generate paths button
-            if self.scanned_files:
-                self.generate_paths_btn.setEnabled(True)
-                create_styled_messagebox(self, "Thành công", f"Tìm thấy {len(self.scanned_files)} files phù hợp!").exec_()
-            else:
-                create_styled_messagebox(self, "Thông báo", "Không tìm thấy files nào phù hợp với pattern!").exec_()
-                
-        except Exception as e:
-            create_styled_messagebox(self, "Lỗi", f"Lỗi khi quét files: {str(e)}", QMessageBox.Critical).exec_()
-    
-    def generate_paths(self):
-        """Tạo danh sách đường dẫn từ files đã quét"""
-        if not self.scanned_files:
-            return
-            
-        try:
-            format_type = self.export_format_combo.currentText()
-            
-            # Generate paths based on selected format
-            paths = []
-            for file_info in self.scanned_files:
-                if format_type == "Đường dẫn đầy đủ":
-                    path = file_info['path']
-                elif format_type == "Đường dẫn tương đối":
-                    path = file_info['relative_path']
-                else:  # "Chỉ tên file"
-                    path = file_info['name']
-                
-                paths.append(path)
-            
-            # Display paths
-            paths_text = '\n'.join(paths)
-            self.paths_text.setPlainText(paths_text)
-            self.copy_paths_btn.setEnabled(True)
-            self.export_txt_btn.setEnabled(True)
-            
-            create_styled_messagebox(self, "Thành công", f"Đã tạo danh sách {len(paths)} đường dẫn!").exec_()
-            
-        except Exception as e:
-            create_styled_messagebox(self, "Lỗi", f"Lỗi khi tạo danh sách: {str(e)}", QMessageBox.Critical).exec_()
-    
-    def copy_paths(self):
-        """Copy danh sách đường dẫn vào clipboard"""
-        try:
-            from PyQt5.QtWidgets import QApplication
-            clipboard = QApplication.clipboard()
-            clipboard.setText(self.paths_text.toPlainText())
-            create_styled_messagebox(self, "Thành công", "Đã copy danh sách vào clipboard!").exec_()
-        except Exception as e:
-            create_styled_messagebox(self, "Lỗi", f"Lỗi khi copy: {str(e)}", QMessageBox.Critical).exec_()
-    
-    def export_to_txt(self):
-        """Xuất danh sách đường dẫn ra file TXT"""
-        try:
-            if not self.scanned_files:
-                create_styled_messagebox(self, "Lỗi", "Không có dữ liệu để xuất!", QMessageBox.Warning).exec_()
-                return
-            
-            # Chọn file để lưu
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Lưu danh sách đường dẫn",
-                f"danh_sach_files_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                "Text Files (*.txt);;All Files (*)"
-            )
-            
-            if file_path:
-                # Lấy nội dung từ text area
-                content = self.paths_text.toPlainText()
-                
-                # Thêm header
-                header = f"Danh sách files - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                header += f"Thư mục: {self.selected_folder_path}\n"
-                header += f"Pattern: {self.regex_edit.text()}\n"
-                header += f"Định dạng: {self.export_format_combo.currentText()}\n"
-                header += "=" * 50 + "\n\n"
-                
-                full_content = header + content
-                
-                # Ghi file với encoding UTF-8
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(full_content)
-                
-                create_styled_messagebox(self, "Thành công", f"Đã xuất file thành công!\n{file_path}").exec_()
-                
-        except Exception as e:
-            create_styled_messagebox(self, "Lỗi", f"Lỗi khi xuất file: {str(e)}", QMessageBox.Critical).exec_()
-        
     def add_cookie(self):
         """Thêm cookie mới"""
         dialog = AddCookieDialog(self)
@@ -2832,11 +1990,62 @@ class MainWindow(QMainWindow):
             self.account_table.setItem(i, 2, status_item)
             
             # Thời gian expires
-            expires_item = QTableWidgetItem(account.get("expires", "Unknown"))
+            expires_text = account.get("expires", "Unknown")
+            expires_item = QTableWidgetItem(expires_text)
             expires_item.setFont(QFont("Roboto", 10))
-            expires_item.setForeground(Qt.darkGray)
             expires_item.setTextAlignment(Qt.AlignCenter)
+            
+            # Kiểm tra cookie có hết hạn không để đổi màu
+            if expires_text != "Unknown":
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    # Parse thời gian từ format "dd/mm/yyyy hh:mm:ss"
+                    expires_time = datetime.strptime(expires_text, "%d/%m/%Y %H:%M:%S")
+                    # Chuyển sang timezone Việt Nam (UTC+7)
+                    expires_time = expires_time.replace(tzinfo=timezone(timedelta(hours=7)))
+                    current_time = datetime.now(timezone(timedelta(hours=7)))
+                    
+                    if expires_time <= current_time:
+                        # Cookie đã hết hạn - màu đỏ
+                        expires_item.setForeground(Qt.red)
+                        expires_item.setFont(QFont("Roboto", 10, QFont.Bold))
+                    else:
+                        # Cookie còn hiệu lực - màu xanh
+                        expires_item.setForeground(Qt.darkGreen)
+                except:
+                    # Nếu không parse được thì để màu mặc định
+                    expires_item.setForeground(Qt.darkGray)
+            else:
+                expires_item.setForeground(Qt.darkGray)
+                
             self.account_table.setItem(i, 3, expires_item)
+            
+            # Container cho các nút action
+            action_widget = QWidget()
+            action_layout = QHBoxLayout()
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            action_layout.setSpacing(4)
+            
+            # Nút Checker
+            checker_btn = QPushButton("🔍 Checker")
+            checker_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
+                    font-weight: bold;
+                    font-size: 9px;
+                }
+                QPushButton:hover {
+                    background-color: #1976D2;
+                }
+                QPushButton:pressed {
+                    background-color: #1565C0;
+                }
+            """)
+            checker_btn.clicked.connect(lambda checked, row=i: self.check_cookie_expiry(row))
             
             # Nút xóa
             delete_btn = QPushButton("🗑️ Xóa")
@@ -2845,10 +2054,10 @@ class MainWindow(QMainWindow):
                     background-color: #f44336;
                     color: white;
                     border: none;
-                    padding: 6px 12px;
-                    border-radius: 4px;
+                    padding: 4px 8px;
+                    border-radius: 3px;
                     font-weight: bold;
-                    font-size: 10px;
+                    font-size: 9px;
                 }
                 QPushButton:hover {
                     background-color: #d32f2f;
@@ -2858,7 +2067,11 @@ class MainWindow(QMainWindow):
                 }
             """)
             delete_btn.clicked.connect(lambda checked, row=i: self.delete_account(row))
-            self.account_table.setCellWidget(i, 4, delete_btn)
+            
+            action_layout.addWidget(checker_btn)
+            action_layout.addWidget(delete_btn)
+            action_widget.setLayout(action_layout)
+            self.account_table.setCellWidget(i, 4, action_widget)
             
         # Auto resize columns và set column widths
         self.account_table.resizeColumnsToContents()
@@ -2947,6 +2160,88 @@ class MainWindow(QMainWindow):
             
             # Hiển thị thông báo thành công
             create_styled_messagebox(self, "Thành công", f"Đã xóa tài khoản {account_name}").exec_()
+
+    def check_cookie_expiry(self, row):
+        """Kiểm tra cookie hết hạn cho tài khoản tại row được chỉ định"""
+        if row >= len(self.accounts):
+            return
+            
+        account = self.accounts[row]
+        account_name = account.get("name", "Unknown")
+        cookie_text = account.get("cookie", "")
+        
+        if not cookie_text or cookie_text.startswith("YOUR_COOKIE_HERE"):
+            create_styled_messagebox(self, "Lỗi", f"Cookie không hợp lệ cho tài khoản {account_name}").exec_()
+            return
+        
+        try:
+            # Test cookie bằng cách gọi session API
+            headers = {
+                "Accept": "application/json",
+                "Cookie": cookie_text,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            response = requests.get("https://labs.google/fx/api/auth/session", 
+                                  headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                user_info = data.get("user", {})
+                user_name = user_info.get("name", "Unknown")
+                user_email = user_info.get("email", "Unknown")
+                
+                # Lấy thời gian expires
+                expires_str = data.get("expires", "")
+                if expires_str:
+                    try:
+                        # Parse thời gian UTC
+                        from datetime import datetime, timezone, timedelta
+                        utc_time = datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
+                        # Chuyển sang giờ Việt Nam (UTC+7)
+                        vn_time = utc_time.astimezone(timezone(timedelta(hours=7)))
+                        current_time = datetime.now(timezone(timedelta(hours=7)))
+                        
+                        # Kiểm tra cookie có hết hạn không
+                        if vn_time <= current_time:
+                            # Cookie đã hết hạn
+                            expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
+                            message = f"⚠️ Cookie đã hết hạn!\n\nTài khoản: {account_name}\nEmail: {user_email}\nHết hạn: {expires_display}\n\nVui lòng truy cập web để lấy cookie mới."
+                            create_styled_messagebox(self, "Cookie Hết Hạn", message, QMessageBox.Critical).exec_()
+                        else:
+                            # Cookie còn hiệu lực
+                            expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
+                            time_left = vn_time - current_time
+                            days_left = time_left.days
+                            hours_left = time_left.seconds // 3600
+                            
+                            if days_left > 0:
+                                time_info = f"{days_left} ngày {hours_left} giờ"
+                            else:
+                                time_info = f"{hours_left} giờ"
+                            
+                            message = f"✅ Cookie còn hiệu lực!\n\nTài khoản: {account_name}\nEmail: {user_email}\nHết hạn: {expires_display}\nCòn lại: {time_info}"
+                            create_styled_messagebox(self, "Cookie Hợp Lệ", message).exec_()
+                    except Exception as e:
+                        message = f"Cookie hợp lệ nhưng không thể parse thời gian hết hạn.\n\nTài khoản: {account_name}\nEmail: {user_email}\nExpires: {expires_str}"
+                        create_styled_messagebox(self, "Cookie Hợp Lệ", message).exec_()
+                else:
+                    message = f"Cookie hợp lệ nhưng không có thông tin thời gian hết hạn.\n\nTài khoản: {account_name}\nEmail: {user_email}"
+                    create_styled_messagebox(self, "Cookie Hợp Lệ", message).exec_()
+            else:
+                # Cookie không hợp lệ hoặc hết hạn
+                message = f"❌ Cookie không hợp lệ hoặc đã hết hạn!\n\nTài khoản: {account_name}\nStatus Code: {response.status_code}\n\nVui lòng truy cập web để lấy cookie mới."
+                create_styled_messagebox(self, "Cookie Không Hợp Lệ", message, QMessageBox.Critical).exec_()
+                
+        except requests.exceptions.Timeout:
+            message = f"⏳ Timeout khi kiểm tra cookie!\n\nTài khoản: {account_name}\n\nVui lòng kiểm tra kết nối mạng và thử lại."
+            create_styled_messagebox(self, "Timeout", message).exec_()
+        except requests.exceptions.ConnectionError:
+            message = f"📡 Không thể kết nối!\n\nTài khoản: {account_name}\n\nVui lòng kiểm tra kết nối mạng và thử lại."
+            create_styled_messagebox(self, "Lỗi Kết Nối", message).exec_()
+        except Exception as e:
+            message = f"❌ Lỗi khi kiểm tra cookie!\n\nTài khoản: {account_name}\nLỗi: {str(e)}\n\nVui lòng truy cập web để lấy cookie mới."
+            create_styled_messagebox(self, "Lỗi", message, QMessageBox.Critical).exec_()
 
     def refresh_accounts(self):
         """Làm mới danh sách accounts"""
@@ -3216,8 +2511,10 @@ class MainWindow(QMainWindow):
         # Create output directory
         os.makedirs(config["output_dir"], exist_ok=True)
         
-        # Disable start button
+        # Disable start button và enable stop button
         self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.is_processing = True
         self.progress_bar.setValue(0)
         self.log_text.clear()
         
@@ -3244,6 +2541,8 @@ class MainWindow(QMainWindow):
     def on_processing_finished(self, results):
         """Khi xử lý hoàn thành"""
         self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.is_processing = False
         
         # Hiển thị dialog kết quả chuyên nghiệp
         dialog = ProcessingResultDialog(results, self)
@@ -3256,6 +2555,99 @@ class MainWindow(QMainWindow):
                 self.log_text.append(f"✓ STT {stt}: {result}")
             else:
                 self.log_text.append(f"❌ STT {stt}: {result}")
+    
+    def stop_processing(self):
+        """Dừng quá trình xử lý video"""
+        if not self.is_processing or not self.processing_thread:
+            return
+        
+        # Xác nhận với người dùng
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Xác nhận dừng")
+        msg.setText("Bạn có chắc chắn muốn dừng quá trình xử lý video?")
+        msg.setInformativeText("Các video đang xử lý sẽ bị hủy và không thể khôi phục.")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        
+        if msg.exec_() == QMessageBox.Yes:
+            # Dừng thread
+            self.processing_thread.terminate()
+            self.processing_thread.wait()  # Đợi thread kết thúc
+            
+            # Reset UI
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.is_processing = False
+            
+            # Hiển thị thông báo
+            self.log_text.append(f"\n⏹️ ĐÃ DỪNG QUÁ TRÌNH XỬ LÝ VIDEO")
+            self.progress_label.setText("Đã dừng xử lý video")
+            create_styled_messagebox(self, "Thông báo", "Đã dừng quá trình xử lý video!", QMessageBox.Information).exec_()
+    
+    def retry_failed_videos(self, failed_videos):
+        """Chạy lại các video thất bại"""
+        if not failed_videos:
+            return
+        
+        # Lấy thông tin từ failed videos
+        retry_prompts = []
+        for stt, prompt, success, error in failed_videos:
+            # Tìm image path từ Excel table
+            image_path = None
+            for row in range(self.excel_table.rowCount()):
+                stt_item = self.excel_table.item(row, 0)
+                if stt_item and int(stt_item.text()) == stt:
+                    image_item = self.excel_table.item(row, 2)
+                    if image_item and image_item.text() not in ["None", "❌ Not found"]:
+                        image_path = image_item.text()
+                    break
+            
+            retry_prompts.append((stt, prompt, image_path))
+        
+        # Lấy tài khoản hợp lệ
+        valid_accounts = []
+        for account in self.accounts:
+            cookie_text = account.get("cookie", "")
+            if cookie_text and not cookie_text.startswith("YOUR_COOKIE_HERE"):
+                valid_accounts.append(account)
+        
+        if not valid_accounts:
+            create_styled_messagebox(self, "Lỗi", "Không có tài khoản hợp lệ để chạy lại!", QMessageBox.Warning).exec_()
+            return
+        
+        # Chuẩn bị config (sử dụng cùng config như lần trước)
+        output_dir = self.output_dir_edit.text().strip()
+        if not output_dir:
+            output_dir = "output"
+        
+        aspect_ratio_text = self.aspect_ratio_combo.currentText()
+        if aspect_ratio_text == "9:16":
+            aspect_ratio = "VIDEO_ASPECT_RATIO_PORTRAIT"
+        else:
+            aspect_ratio = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        
+        config = {
+            "project_id": self.project_id_edit.text(),
+            "output_dir": output_dir,
+            "aspect_ratio": aspect_ratio,
+            "proxy": None
+        }
+        
+        # Disable start button, enable stop button và reset progress
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.is_processing = True
+        self.progress_bar.setValue(0)
+        self.log_text.append(f"\n🔄 BẮT ĐẦU CHẠY LẠI {len(retry_prompts)} VIDEO THẤT BẠI...")
+        
+        # Start processing thread với retry prompts
+        max_workers = self.max_workers_spin.value()
+        self.processing_thread = VideoProcessingThread(retry_prompts, valid_accounts, config, max_workers)
+        self.processing_thread.progress_updated.connect(self.on_progress_updated)
+        self.processing_thread.status_updated.connect(self.on_status_updated)
+        self.processing_thread.finished.connect(self.on_processing_finished)
+        self.processing_thread.start()
                 
     def add_video_to_merge(self):
         """Thêm video vào danh sách ghép"""
