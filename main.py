@@ -740,6 +740,16 @@ class VideoProcessingThread(QThread):
             'backoff_factor': 0.3
         }
         
+        # Thêm flag để kiểm soát việc dừng
+        self.should_stop = False
+        self.executor = None
+    
+    def stop_processing(self):
+        """Dừng quá trình xử lý"""
+        self.should_stop = True
+        if self.executor:
+            self.executor.shutdown(wait=False)
+        
     def distribute_prompts_to_accounts(self):
         """Chia đều prompts cho các tài khoản để tối ưu hóa"""
         if not self.accounts_data or not self.prompts:
@@ -886,6 +896,10 @@ class VideoProcessingThread(QThread):
         stt, prompt, image_path = prompt_data
         account_name = account_data.get("name", "Unknown")
         
+        # Kiểm tra should_stop ngay từ đầu
+        if self.should_stop:
+            return (stt, prompt, False, "Đã dừng bởi người dùng")
+        
         try:
             # Lấy token từ cookie của tài khoản được chỉ định
             cookie_header_value = account_data["cookie"]
@@ -913,6 +927,10 @@ class VideoProcessingThread(QThread):
             
             # Generate video - Auto-select model based on image presence
             if image_path and os.path.exists(image_path):
+                # Kiểm tra should_stop trước khi upload
+                if self.should_stop:
+                    return (stt, prompt, False, "Đã dừng bởi người dùng")
+                
                 # Image-to-video: Select model based on aspect ratio
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
                     model_key = "veo_3_i2v_s_fast_portrait_ultra"
@@ -921,6 +939,11 @@ class VideoProcessingThread(QThread):
                     
                 self.status_updated.emit(f"STT {stt}: 📤 Uploading image với {account_name}...")
                 media_id = upload_image(token, image_path)
+                
+                # Kiểm tra should_stop sau khi upload
+                if self.should_stop:
+                    return (stt, prompt, False, "Đã dừng bởi người dùng")
+                
                 self.status_updated.emit(f"STT {stt}: 🎬 Generating video from image với {account_name}...")
                 gen_resp, scene_id = generate_video_from_image(
                     token, prompt, media_id, 
@@ -929,6 +952,10 @@ class VideoProcessingThread(QThread):
                     self.config["aspect_ratio"]
                 )
             else:
+                # Kiểm tra should_stop trước khi generate
+                if self.should_stop:
+                    return (stt, prompt, False, "Đã dừng bởi người dùng")
+                
                 # Text-to-video: Select model based on aspect ratio
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
                     model_key = "veo_3_0_t2v_fast_portrait_ultra"
@@ -1004,7 +1031,9 @@ class VideoProcessingThread(QThread):
             
             # Sử dụng ThreadPoolExecutor để xử lý parallel với chia tải tối ưu
             results = []
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            
+            try:
                 # Tạo tasks với account distribution
                 future_to_prompt = {}
                 
@@ -1014,7 +1043,9 @@ class VideoProcessingThread(QThread):
                     
                     # Submit tasks cho từng account
                     for prompt_data in prompts:
-                        future = executor.submit(self.process_video_with_specific_account, prompt_data, account_data)
+                        if self.should_stop:
+                            break
+                        future = self.executor.submit(self.process_video_with_specific_account, prompt_data, account_data)
                         future_to_prompt[future] = prompt_data
                 
                 # Xử lý kết quả khi hoàn thành với batch processing
@@ -1022,6 +1053,12 @@ class VideoProcessingThread(QThread):
                 batch_count = 0
                 
                 for future in as_completed(future_to_prompt):
+                    if self.should_stop:
+                        # Cancel các future còn lại
+                        for f in future_to_prompt:
+                            f.cancel()
+                        break
+                        
                     prompt_data = future_to_prompt[future]
                     stt, prompt, image_path = prompt_data
                     
@@ -1045,6 +1082,11 @@ class VideoProcessingThread(QThread):
                         results.append((stt, prompt, False, str(e)))
                         self.processed_count += 1
                         batch_count += 1
+                        
+            finally:
+                # Shutdown executor
+                if self.executor:
+                    self.executor.shutdown(wait=False)
                         
             # Sắp xếp results theo STT
             results.sort(key=lambda x: x[0])
@@ -2571,9 +2613,17 @@ class MainWindow(QMainWindow):
         msg.setDefaultButton(QMessageBox.No)
         
         if msg.exec_() == QMessageBox.Yes:
-            # Dừng thread
-            self.processing_thread.terminate()
-            self.processing_thread.wait()  # Đợi thread kết thúc
+            # Dừng thread bằng cách set flag should_stop
+            if self.processing_thread and hasattr(self.processing_thread, 'stop_processing'):
+                self.processing_thread.stop_processing()
+            
+            # Đợi một chút để thread có thể dừng gracefully
+            self.processing_thread.wait(3000)  # Đợi tối đa 3 giây
+            
+            # Force terminate nếu vẫn chưa dừng
+            if self.processing_thread.isRunning():
+                self.processing_thread.terminate()
+                self.processing_thread.wait()
             
             # Reset UI
             self.start_btn.setEnabled(True)
