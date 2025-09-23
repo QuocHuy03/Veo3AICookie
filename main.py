@@ -800,9 +800,6 @@ class VideoProcessingThread(QThread):
         """Xử lý một video đơn lẻ với auto account rotation"""
         stt, prompt, image_path = prompt_data
         
-        print(f"DEBUG: STT {stt} - Processing video")
-        print(f"DEBUG: STT {stt} - Image path: {image_path}")
-        print(f"DEBUG: STT {stt} - Image exists: {image_path and os.path.exists(image_path) if image_path else False}")
         
         try:
             # Lấy tài khoản tiếp theo để xoay vòng
@@ -828,9 +825,10 @@ class VideoProcessingThread(QThread):
             output_path = os.path.join(self.config["output_dir"], output_filename)
             
             # Generate video - Auto-select model based on image presence and aspect ratio
+            # Always generate at 720p first, then upscale if needed
             if image_path and os.path.exists(image_path):
                 print("Vào video rồi nè cu hề")
-                # Image-to-video: Select model based on aspect ratio
+                # Image-to-video: Select model based on aspect ratio (always 720p)
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
                     model_key = "veo_3_i2v_s_fast_portrait_ultra"
                 else:  # LANDSCAPE
@@ -847,7 +845,7 @@ class VideoProcessingThread(QThread):
                 )
             else:
                 print("Vào text rồi nè cu hề")
-                # Text-to-video: Select model based on aspect ratio
+                # Text-to-video: Select model based on aspect ratio (always 720p)
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
                     model_key = "veo_3_0_t2v_fast_portrait_ultra"
                 else:  # LANDSCAPE
@@ -860,6 +858,10 @@ class VideoProcessingThread(QThread):
                     model_key,
                     self.config["aspect_ratio"]
                 )
+            
+            
+            # Lấy mediaId từ generate response ngay sau khi generate
+            video_media_id = extract_video_media_id(gen_resp)
             
             # Poll status - sử dụng hàm poll_status từ main.py
             op_name = extract_op_name(gen_resp)
@@ -879,10 +881,85 @@ class VideoProcessingThread(QThread):
                 self.status_updated.emit(f"STT {stt}: ❌ Lỗi polling: {str(e)}")
                 return (stt, prompt, False, f"Polling error: {str(e)}")
             
-            # Download video
-            self.status_updated.emit(f"STT {stt}: 📥 Downloading video...")
-            fife_url = extract_fife_url(status_resp)
-            http_download_mp4(fife_url, output_path)
+            # Download video (chỉ khi không có upscale)
+            if not self.config.get("use_upscale", False):
+                self.status_updated.emit(f"STT {stt}: 📥 Downloading video...")
+                fife_url = extract_fife_url(status_resp)
+                http_download_mp4(fife_url, output_path)
+            
+            # Upscale to 1080p if requested
+            if self.config.get("use_upscale", False):
+                self.status_updated.emit(f"STT {stt}: 🔄 Upscaling to 1080p...")
+                try:
+                    # Sử dụng video_media_id đã lấy từ gen_resp
+                    if not video_media_id:
+                        raise ValueError("Không có video_media_id để upscale")
+                    
+                    self.status_updated.emit(f"STT {stt}: 📤 Using video mediaId for upscaling")
+                    
+                    # Upscale video
+                    upscale_resp, upscale_scene_id = upscale_video(
+                        token, video_media_id, 
+                        self.config["project_id"], 
+                        "1080p",
+                        self.config["aspect_ratio"]
+                    )
+                    
+                    # Poll upscale status
+                    upscale_op_name = extract_op_name(upscale_resp)
+                    self.status_updated.emit(f"STT {stt}: ⏳ Waiting for upscale...")
+                    upscale_status_resp = poll_status(token, upscale_op_name, upscale_scene_id, interval_sec=2.0, timeout_sec=600)
+                    
+                    # Lấy mediaId từ upscale response
+                    upscale_media_id = extract_upscale_media_id(upscale_status_resp)
+                    if not upscale_media_id:
+                        raise ValueError("Không thể lấy mediaId từ upscale response")
+                    
+                    # Lấy encodedVideo từ mediaId
+                    self.status_updated.emit(f"STT {stt}: 📥 Getting encoded video...")
+                    encoded_video = get_encoded_video(token, upscale_media_id)
+                    if not encoded_video:
+                        raise ValueError("Không thể lấy encodedVideo từ mediaId")
+                    
+                    # Tải video từ encodedVideo
+                    self.status_updated.emit(f"STT {stt}: 📥 Downloading upscaled video...")
+                    download_encoded_video(encoded_video, output_path)
+                    
+                    # Xóa upscale media sau khi upscale xong
+                    try:
+                        # Lấy cookie từ account hiện tại
+                        current_account = self.get_current_account()
+                        if current_account and current_account.get("cookie"):
+                            cookie_header_value = current_account["cookie"]
+                            # Chỉ xóa upscale media (video media gốc giữ lại)
+                            delete_success = delete_media([upscale_media_id], cookie_header_value)
+                            if delete_success:
+                                self.status_updated.emit(f"STT {stt}: 🧹 Đã xóa upscale media")
+                            else:
+                                self.status_updated.emit(f"STT {stt}: ⚠️ Không thể xóa upscale media")
+                    except Exception as e:
+                        self.status_updated.emit(f"STT {stt}: ⚠️ Lỗi xóa upscale media: {str(e)}")
+                    
+                    self.status_updated.emit(f"STT {stt}: ✅ Upscaled to 1080p!")
+                except Exception as e:
+                    self.status_updated.emit(f"STT {stt}: ⚠️ Upscale failed: {str(e)}")
+                    self.status_updated.emit(f"STT {stt}: ✅ Video generated at 720p")
+            
+            # Xóa media sau khi tải video xong (nếu có image)
+            if image_path and os.path.exists(image_path):
+                try:
+                    # Lấy cookie từ account hiện tại
+                    current_account = self.get_current_account()
+                    if current_account and current_account.get("cookie"):
+                        cookie_header_value = current_account["cookie"]
+                        # Xóa media đã upload
+                        delete_success = delete_media([media_id], cookie_header_value)
+                        if delete_success:
+                            self.status_updated.emit(f"STT {stt}: 🧹 Đã xóa media sau khi tải xong")
+                        else:
+                            self.status_updated.emit(f"STT {stt}: ⚠️ Không thể xóa media")
+                except Exception as e:
+                    self.status_updated.emit(f"STT {stt}: ⚠️ Lỗi xóa media: {str(e)}")
             
             self.status_updated.emit(f"STT {stt}: ✅ Hoàn thành: {output_filename}")
             return (stt, prompt, True, output_filename)
@@ -895,6 +972,7 @@ class VideoProcessingThread(QThread):
         """Xử lý video với tài khoản cụ thể (cho thuật toán chia tải tối ưu)"""
         stt, prompt, image_path = prompt_data
         account_name = account_data.get("name", "Unknown")
+        
         
         # Kiểm tra should_stop ngay từ đầu
         if self.should_stop:
@@ -969,7 +1047,7 @@ class VideoProcessingThread(QThread):
                     model_key,
                     self.config["aspect_ratio"]
                 )
-            
+         
             # Poll status với retry logic tối ưu
             op_name = extract_op_name(gen_resp)
             self.status_updated.emit(f"STT {stt}: ⏳ Checking generation status với {account_name}...")
@@ -1004,10 +1082,80 @@ class VideoProcessingThread(QThread):
                         self.status_updated.emit(f"STT {stt}: ⚠️ Lỗi polling, retry {attempt + 1}/{max_retries} với {account_name}...")
                         time.sleep(base_delay * (2 ** attempt))
             
-            # Download video
-            self.status_updated.emit(f"STT {stt}: 📥 Downloading video từ {account_name}...")
-            fife_url = extract_fife_url(status_resp)
-            http_download_mp4(fife_url, output_path)
+            # Download video (chỉ khi không có upscale)
+            if not self.config.get("use_upscale", False):
+                self.status_updated.emit(f"STT {stt}: 📥 Downloading video từ {account_name}...")
+                fife_url = extract_fife_url(status_resp)
+                http_download_mp4(fife_url, output_path)
+            
+            # Upscale to 1080p if requested
+            if self.config.get("use_upscale", False):
+                self.status_updated.emit(f"STT {stt}: 🔄 Upscaling to 1080p...")
+                try:
+                    # Lấy mediaId từ video generation response
+                    video_media_id = extract_video_media_id(status_resp)
+                    if not video_media_id:
+                        raise ValueError("Không thể lấy mediaId từ video generation response")
+                    
+                    self.status_updated.emit(f"STT {stt}: 📤 Using video mediaId for upscaling")
+                    
+                    # Upscale video
+                    upscale_resp, upscale_scene_id = upscale_video(
+                        token, video_media_id, 
+                        self.config["project_id"], 
+                        "1080p",
+                        self.config["aspect_ratio"]
+                    )
+                    
+                    # Poll upscale status
+                    upscale_op_name = extract_op_name(upscale_resp)
+                    self.status_updated.emit(f"STT {stt}: ⏳ Waiting for upscale...")
+                    upscale_status_resp = poll_status(token, upscale_op_name, upscale_scene_id, interval_sec=2.0, timeout_sec=600)
+                    
+                    # Lấy mediaId từ upscale response
+                    upscale_media_id = extract_upscale_media_id(upscale_status_resp)
+                    if not upscale_media_id:
+                        raise ValueError("Không thể lấy mediaId từ upscale response")
+                    
+                    # Lấy encodedVideo từ mediaId
+                    self.status_updated.emit(f"STT {stt}: 📥 Getting encoded video...")
+                    encoded_video = get_encoded_video(token, upscale_media_id)
+                    if not encoded_video:
+                        raise ValueError("Không thể lấy encodedVideo từ mediaId")
+                    
+                    # Tải video từ encodedVideo
+                    self.status_updated.emit(f"STT {stt}: 📥 Downloading upscaled video...")
+                    download_encoded_video(encoded_video, output_path)
+                    
+                    # Xóa upscale media sau khi upscale xong
+                    try:
+                        # Chỉ xóa upscale media (video media gốc giữ lại)
+                        delete_success = delete_media([upscale_media_id], cookie_header_value)
+                        if delete_success:
+                            self.status_updated.emit(f"STT {stt}: 🧹 Đã xóa upscale media")
+                        else:
+                            self.status_updated.emit(f"STT {stt}: ⚠️ Không thể xóa upscale media")
+                    except Exception as e:
+                        self.status_updated.emit(f"STT {stt}: ⚠️ Lỗi xóa upscale media: {str(e)}")
+                    
+                    self.status_updated.emit(f"STT {stt}: ✅ Upscaled to 1080p!")
+                except Exception as e:
+                    self.status_updated.emit(f"STT {stt}: ⚠️ Upscale failed: {str(e)}")
+                    self.status_updated.emit(f"STT {stt}: ✅ Video generated at 720p")
+            
+            # Xóa media sau khi tải video xong (nếu có image)
+            if image_path and os.path.exists(image_path):
+                try:
+                    # Xóa media đã upload
+                    delete_success = delete_media([media_id], cookie_header_value)
+                    if delete_success:
+                        self.status_updated.emit(f"STT {stt}: 🧹 Đã xóa media sau khi tải xong")
+                    else:
+                        self.status_updated.emit(f"STT {stt}: ⚠️ Không thể xóa media")
+                except Exception as e:
+                    self.status_updated.emit(f"STT {stt}: ⚠️ Lỗi xóa media: {str(e)}")
+            else:
+                pass
             
             self.status_updated.emit(f"STT {stt}: ✅ Hoàn thành với {account_name}: {output_filename}")
             return (stt, prompt, True, output_filename)
@@ -1019,6 +1167,7 @@ class VideoProcessingThread(QThread):
     def run(self):
         try:
             account_count = len(self.accounts_data)
+            
             
             # Hiển thị thông tin chia tải
             distribution_info = []
@@ -1353,6 +1502,16 @@ class MainWindow(QMainWindow):
         ])
         self.aspect_ratio_combo.setCurrentIndex(0)  # Default to landscape
         config_layout.addRow("Aspect Ratio:", self.aspect_ratio_combo)
+        
+        # Resolution selection
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItems([
+            "720p (Standard)",
+            "1080p (Upscale)"
+        ])
+        self.resolution_combo.setCurrentIndex(0)  # Default to 720p
+        self.resolution_combo.setToolTip("720p: Generate trực tiếp\n1080p: Generate 720p rồi upscale lên 1080p")
+        config_layout.addRow("Resolution:", self.resolution_combo)
         
         config_group.setLayout(config_layout)
         left_layout.addWidget(config_group)
@@ -1926,6 +2085,7 @@ class MainWindow(QMainWindow):
         tab.setLayout(main_layout)
         self.tab_widget.addTab(tab, "Ghép Video")
         
+        
     def add_cookie(self):
         """Thêm cookie mới"""
         dialog = AddCookieDialog(self)
@@ -2343,6 +2503,7 @@ class MainWindow(QMainWindow):
                     border-left: 4px solid #4caf50;
                 }
             """)
+        
                 
     def browse_excel(self):
         """Chọn file Excel"""
@@ -2519,10 +2680,8 @@ class MainWindow(QMainWindow):
                 if image_item and image_item.text() not in ["None", "❌ Not found"]:
                     # Use full path directly from table (already stored as full path)
                     image_path = image_item.text()
-                    print(f"DEBUG: STT {stt} - Image path: {image_path}")
-                    print(f"DEBUG: STT {stt} - Image exists: {os.path.exists(image_path)}")
-                else:
-                    print(f"DEBUG: STT {stt} - No image or image not found")
+                if not os.path.exists(image_path):
+                    pass
                     
                 prompts.append((stt, prompt, image_path))
                 
@@ -2541,13 +2700,18 @@ class MainWindow(QMainWindow):
             aspect_ratio = "VIDEO_ASPECT_RATIO_PORTRAIT"
         else:  # "16:9" or default
             aspect_ratio = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+        
+        # Get resolution from combo box
+        resolution_text = self.resolution_combo.currentText()
+        use_upscale = "1080p" in resolution_text
             
         config = {
             "project_id": self.project_id_edit.text(),
             "seed": self.seed_spin.value(),
             "max_workers": self.max_workers_spin.value(),
             "output_dir": output_dir,
-            "aspect_ratio": aspect_ratio
+            "aspect_ratio": aspect_ratio,
+            "use_upscale": use_upscale
         }
         
         # Create output directory
@@ -2795,7 +2959,6 @@ class MainWindow(QMainWindow):
             create_styled_messagebox(self, "Thành công", message).exec_()
         else:
             create_styled_messagebox(self, "Lỗi", message, QMessageBox.Critical).exec_()
-
 
 
     

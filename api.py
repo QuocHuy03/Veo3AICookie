@@ -15,6 +15,7 @@ import pandas as pd
 API_URL = "http://62.171.131.164:5000"
 GENERATE_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoText"
 GENERATE_IMAGE_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage"
+UPSCALE_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoUpsampleVideo"
 CHECK_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus"
 SESSION_URL = "https://labs.google/fx/api/auth/session"
 UPLOAD_IMAGE_URL = "https://aisandbox-pa.googleapis.com/v1:uploadUserImage"
@@ -219,6 +220,61 @@ def http_download_mp4(url: str, output_path: str, proxy: Optional[Dict[str, str]
 					f.write(chunk)
 
 
+def get_encoded_video(token: str, media_id: str, proxy: Optional[Dict[str, str]] = None) -> Optional[str]:
+	"""Lấy encodedVideo từ mediaId sau khi upscale"""
+	print(f"🚀 DEBUG: get_encoded_video được gọi!")
+	print(f"🚀 DEBUG: media_id: {media_id}")
+	
+	url = f"https://aisandbox-pa.googleapis.com/v1/media/{media_id}?clientContext.tool=PINHOLE"
+	headers = get_api_headers(token)
+	
+	session = requests.Session()
+	session.headers.update(headers)
+	session_config = get_session_config()
+	
+	try:
+		resp = session.get(url, proxies=proxy, **session_config)
+		resp.raise_for_status()
+		data = resp.json()
+		
+		# Trích xuất encodedVideo
+		video_data = data.get("video", {})
+		encoded_video = video_data.get("encodedVideo")
+		
+		if encoded_video:
+			print(f"✅ Đã lấy encodedVideo từ mediaId: {media_id[:20]}...")
+			return encoded_video
+		else:
+			print(f"❌ Không tìm thấy encodedVideo trong response")
+			return None
+			
+	except Exception as e:
+		print(f"❌ Lỗi lấy encodedVideo: {e}")
+		return None
+
+
+def download_encoded_video(encoded_video: str, output_path: str) -> None:
+	"""Tải video từ encodedVideo string"""
+	print(f"🚀 DEBUG: download_encoded_video được gọi!")
+	print(f"🚀 DEBUG: output_path: {output_path}")
+	print(f"🚀 DEBUG: encoded_video length: {len(encoded_video)}")
+	
+	try:
+		import base64
+		# Decode base64 encoded video
+		video_data = base64.b64decode(encoded_video)
+		
+		# Ghi file video
+		with open(output_path, 'wb') as f:
+			f.write(video_data)
+		
+		print(f"✅ Đã tải video từ encodedVideo: {output_path}")
+		
+	except Exception as e:
+		print(f"❌ Lỗi tải video từ encodedVideo: {e}")
+		raise
+
+
 def delete_media(names: List[str], cookie_header_value: Optional[str], proxy: Optional[Dict[str, str]] = None, max_retries: int = 3) -> bool:
 	"""Gọi API xóa media trên labs.google. Trả về True nếu thành công.
 
@@ -309,6 +365,59 @@ def upload_image(token: str, image_path: str, proxy: Optional[Dict[str, str]] = 
 	return media_gen_id
 
 
+def upload_video(token: str, video_path: str, proxy: Optional[Dict[str, str]] = None) -> str:
+	"""Upload video và trả về mediaGenerationId - sử dụng cùng endpoint nhưng với payload video"""
+	print(f"🚀 DEBUG: upload_video được gọi!")
+	print(f"🚀 DEBUG: video_path: {video_path}")
+	print(f"🚀 DEBUG: video_path exists: {os.path.exists(video_path)}")
+	
+	if not os.path.exists(video_path):
+		raise FileNotFoundError(f"Không tìm thấy file video: {video_path}")
+	
+	# Đọc file video
+	with open(video_path, "rb") as f:
+		video_data = f.read()
+	
+	# Chuyển đổi thành base64
+	import base64
+	base64_data = base64.b64encode(video_data).decode('utf-8')
+	
+	# Xác định mime type
+	mime_type = "video/mp4"
+	if video_path.lower().endswith('.mov'):
+		mime_type = "video/quicktime"
+	elif video_path.lower().endswith('.avi'):
+		mime_type = "video/x-msvideo"
+	elif video_path.lower().endswith('.webm'):
+		mime_type = "video/webm"
+	
+	# Tạo session ID ngẫu nhiên
+	session_id = f";{int(time.time() * 1000)}"
+	
+	# Sử dụng cùng endpoint nhưng với payload video (sử dụng imageInput thay vì videoInput)
+	payload = {
+		"imageInput": {
+			"aspectRatio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
+			"isUserUploaded": True,
+			"mimeType": mime_type,
+			"rawImageBytes": base64_data
+		},
+		"clientContext": {
+			"sessionId": session_id,
+			"tool": "ASSET_MANAGER"
+		}
+	}
+	
+	response = http_post_json(UPLOAD_IMAGE_URL, payload, token, proxy)
+	
+	# Trích xuất mediaGenerationId
+	media_gen_id = response.get("mediaGenerationId", {}).get("mediaGenerationId")
+	if not media_gen_id:
+		raise ValueError("Không tìm thấy mediaGenerationId trong phản hồi upload video")
+	
+	return media_gen_id
+
+
 def generate_video(token: str, prompt: str, project_id: str, model_key: str = "veo_3_0_t2v_fast_ultra", aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE", seed: Optional[int] = None, proxy: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], str]:
 	"""Generate video và trả về response cùng với scene_id được tạo"""
 	if seed is None:
@@ -395,6 +504,53 @@ def generate_video_from_image(token: str, prompt: str, media_id: str, project_id
 	return response, scene_id
 
 
+def upscale_video(token: str, video_media_id: str, project_id: str, scale: str = "1080p", aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE", seed: Optional[int] = None, proxy: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], str]:
+	"""Upscale video và trả về response cùng với scene_id được tạo"""
+	if seed is None:
+		# Đọc seed từ config, nếu seed = 0 thì random
+		config = _load_config()
+		config_seed = config.get("seed", 0)
+		if config_seed == 0:
+			seed = int(time.time()) % 65535
+		else:
+			seed = config_seed
+	
+	# Tạo scene_id ngẫu nhiên
+	scene_id = str(uuid.uuid4())
+	
+	# Chọn model key dựa trên scale
+	if scale == "720p":
+		model_key = "veo_2_720p_upsampler_8s"
+	elif scale == "1080p":
+		model_key = "veo_2_1080p_upsampler_8s"
+	else:
+		model_key = "veo_2_1080p_upsampler_8s"  # Default to 1080p
+	
+	# Tạo session ID ngẫu nhiên
+	session_id = f";{int(time.time() * 1000)}"
+	
+	payload = {
+		"clientContext": {
+			"sessionId": session_id
+		},
+		"requests": [
+			{
+				"aspectRatio": aspect_ratio,
+				"seed": seed,
+				"videoInput": {
+					"mediaId": video_media_id
+				},
+				"videoModelKey": model_key,
+				"metadata": {
+					"sceneId": scene_id
+				}
+			}
+		]
+	}
+	response = http_post_json(UPSCALE_URL, payload, token, proxy)
+	return response, scene_id
+
+
 def extract_op_name(response_json: Dict[str, Any]) -> str:
 	ops = response_json.get("operations", [])
 	if not ops:
@@ -432,6 +588,87 @@ def poll_status(token: str, operation_name: str, scene_id: str, interval_sec: fl
 			raise RuntimeError(f"Media generation thất bại: {json.dumps(resp, ensure_ascii=False)}")
 		time.sleep(interval_sec)
 	raise TimeoutError("Hết thời gian chờ media generation")
+
+
+def _extract_media_id_from_operation(operation: Dict[str, Any], search_paths: List[List[str]], debug_prefix: str) -> Optional[str]:
+	"""Hàm chung để trích xuất mediaId từ operation với các đường dẫn tìm kiếm"""
+	media_id = None
+	
+	for i, path in enumerate(search_paths):
+		current = operation
+		path_str = ".".join(path)
+		
+		try:
+			for key in path:
+				if isinstance(current, dict) and key in current:
+					current = current[key]
+				else:
+					current = None
+					break
+			
+			if current:
+				media_id = current
+				print(f"✅ {debug_prefix} - Found mediaId at: {path_str}")
+				break
+		except Exception as e:
+			continue
+	
+	return media_id
+
+
+def extract_video_media_id(status_json: Dict[str, Any]) -> Optional[str]:
+	"""Trích xuất mediaId từ video generation response"""
+	try:
+		operations = status_json.get("operations", [])
+		
+		if operations:
+			operation = operations[0]
+			
+			# Đường dẫn tìm kiếm cho video generation
+			search_paths = [
+				["mediaGenerationId"],  # Vị trí 1: operation.mediaGenerationId
+				["response", "mediaId"],  # Vị trí 2: operation.response.mediaId
+				["operation", "mediaId"],  # Vị trí 3: operation.operation.mediaId
+				["metadata", "mediaId"]   # Vị trí 4: operation.metadata.mediaId
+			]
+			
+			media_id = _extract_media_id_from_operation(operation, search_paths, "Video mediaId")
+			
+			if media_id:
+				return media_id
+		
+		print("❌ Không tìm thấy mediaId trong video generation response")
+		return None
+	except Exception as e:
+		print(f"❌ Lỗi trích xuất video mediaId: {e}")
+		return None
+
+
+def extract_upscale_media_id(response_json: Dict[str, Any]) -> Optional[str]:
+	"""Trích xuất mediaId từ response upscale"""
+	try:
+		operations = response_json.get("operations", [])
+		
+		if operations:
+			operation = operations[0]
+			
+			# Đường dẫn tìm kiếm cho upscale response
+			search_paths = [
+				["mediaGenerationId"],  # Vị trí 1: operation.mediaGenerationId
+				["metadata", "video", "mediaGenerationId"],  # Vị trí 2: operation.metadata.video.mediaGenerationId
+				["response", "mediaId"]  # Vị trí 3: operation.response.mediaId (backup)
+			]
+			
+			media_id = _extract_media_id_from_operation(operation, search_paths, "Upscale mediaId")
+			
+			if media_id:
+				return media_id
+		
+		print("❌ Không tìm thấy mediaId trong upscale response")
+		return None
+	except Exception as e:
+		print(f"❌ Lỗi trích xuất upscale mediaId: {e}")
+		return None
 
 
 def extract_fife_url(status_json: Dict[str, Any]) -> str:
@@ -641,296 +878,4 @@ def read_excel_prompts(excel_file: str, require_image: bool = False) -> List[Tup
 	except Exception as e:
 		print(f"\n❌ Lỗi đọc file Excel: {e}")
 		exit(1)
-
-
-def process_single_prompt(args: Tuple[int, str, Optional[str], str, str, str, str, Optional[Dict[str, str]], Optional[str]]) -> Tuple[int, str, bool, str]:
-	"""Xử lý một prompt đơn lẻ trong thread riêng với auto retry"""
-	stt, prompt, image_path, token, project_id, model_key, output_dir, proxy, cookie_header_value = args
-	
-	# Đọc cấu hình retry từ config
-	config = _load_config()
-	retry_config = config.get("auto_retry", {})
-	enable_auto_retry = retry_config.get("enable_auto_retry", True)
-	max_retries = retry_config.get("max_retries", 3)
-	base_delay = retry_config.get("base_delay", 2.0)
-	max_delay = retry_config.get("max_delay", 30.0)
-	backoff_factor = retry_config.get("backoff_factor", 2.0)
-	
-	def _process_prompt_internal():
-		"""Hàm internal để retry"""
-		print(f"[Thread {threading.current_thread().name}] Bắt đầu xử lý STT {stt}: {prompt[:50]}...")
-		
-		# Tạo tên file output ngắn gọn
-		output_filename = create_short_filename(stt, prompt)
-		output_path = os.path.join(output_dir, output_filename)
-		
-		# Generate video
-		if image_path and os.path.exists(image_path):
-			# Có image - upload image trước, rồi generate video từ image + prompt
-			print(f"[Thread {threading.current_thread().name}] Upload image: {image_path}")
-			media_id = upload_image(token, image_path, proxy)
-			print(f"[Thread {threading.current_thread().name}] ✅ Upload thành công - Media ID: {media_id}")
-			
-			# Generate video từ image + prompt
-			print(f"[Thread {threading.current_thread().name}] 🎬 Bắt đầu tạo video từ image + prompt...")
-			gen_resp, scene_id = generate_video_from_image(token, prompt, media_id, project_id, model_key, proxy=proxy)
-		else:
-			# Không có image - generate video từ prompt only
-			print(f"[Thread {threading.current_thread().name}] 🎬 Bắt đầu tạo video từ prompt...")
-			gen_resp, scene_id = generate_video(token, prompt, project_id, model_key, proxy=proxy)
-			media_id = None
-		
-		op_name = extract_op_name(gen_resp)
-		
-		# Poll status
-		print(f"[Thread {threading.current_thread().name}] ⏳ Đang chờ video được tạo...")
-		status_resp = poll_status(token, op_name, scene_id, proxy=proxy)
-		
-		# Download video trực tiếp dưới dạng MP4
-		print(f"[Thread {threading.current_thread().name}] 📥 Đang tải video...")
-		fife_url = extract_fife_url(status_resp)
-		http_download_mp4(fife_url, output_path, proxy)
-		
-		# Sau khi tải xong, nếu có media_id (luồng image), thực hiện xóa media trên server
-		try:
-			if media_id and cookie_header_value:
-				print(f"[Thread {threading.current_thread().name}] 🧹 Xóa media tạm trên server...")
-				delete_media([media_id], cookie_header_value, proxy)
-		except Exception as e:
-			print(f"[Thread {threading.current_thread().name}] ⚠ Không thể xóa media: {e}")
-		
-		print(f"[Thread {threading.current_thread().name}] ✅ Hoàn thành STT {stt}: {output_filename}")
-		return (stt, prompt, True, output_filename)
-	
-	try:
-		if enable_auto_retry:
-			# Sử dụng auto retry với cấu hình từ config
-			return auto_retry_with_backoff(
-				_process_prompt_internal,
-				max_retries=max_retries,
-				base_delay=base_delay,
-				max_delay=max_delay,
-				backoff_factor=backoff_factor,
-				retry_on_exceptions=(
-					requests.exceptions.RequestException,
-					requests.exceptions.Timeout,
-					requests.exceptions.ConnectionError,
-					requests.exceptions.HTTPError,
-					Exception  # Có thể retry với mọi exception
-				)
-			)
-		else:
-			# Không sử dụng auto retry, chạy trực tiếp
-			return _process_prompt_internal()
-	except Exception as e:
-		print(f"[Thread {threading.current_thread().name}] ❌ Lỗi xử lý STT {stt} sau khi retry: {e}")
-		return (stt, prompt, False, str(e))
-
-
-def process_single_prompt_batch(prompt: str, token: str, project_id: str, 
-                               model_key: str = "veo_3_0_t2v_fast_ultra", 
-                               max_workers: int = 5, output_dir: str = "output", 
-                               proxy: Optional[Dict[str, str]] = None,
-                               cookie_header_value: Optional[str] = None) -> None:
-	"""Xử lý một prompt duy nhất nhưng tạo nhiều video với đa luồng"""
-	
-	# Đọc cấu hình retry để hiển thị thông tin
-	config = _load_config()
-	retry_config = config.get("auto_retry", {})
-	enable_auto_retry = retry_config.get("enable_auto_retry", True)
-	max_retries = retry_config.get("max_retries", 3)
-	
-	# Tạo thư mục output nếu chưa có
-	os.makedirs(output_dir, exist_ok=True)
-	
-	# Tạo danh sách prompts giống nhau để xử lý song song
-	prompts = [(i+1, prompt, None) for i in range(max_workers)]
-	
-	print(f"Bắt đầu xử lý prompt '{prompt}' với {max_workers} luồng...")
-	if enable_auto_retry:
-		print(f"🔄 Auto retry: BẬT (tối đa {max_retries} lần retry cho mỗi prompt)")
-	else:
-		print(f"🔄 Auto retry: TẮT")
-	
-	# Chuẩn bị arguments cho mỗi thread
-	args_list = [
-		(stt, prompt, image_path, token, project_id, model_key, output_dir, proxy, cookie_header_value)
-		for stt, prompt, image_path in prompts
-	]
-	
-	# Xử lý với ThreadPoolExecutor
-	results = []
-	with ThreadPoolExecutor(max_workers=max_workers) as executor:
-		# Submit tất cả tasks
-		future_to_args = {executor.submit(process_single_prompt, args): args for args in args_list}
-		
-		# Thu thập kết quả
-		for future in as_completed(future_to_args):
-			args = future_to_args[future]
-			try:
-				result = future.result()
-				results.append(result)
-			except Exception as e:
-				stt, prompt = args[0], args[1]
-				print(f"Lỗi không mong đợi với STT {stt}: {e}")
-				results.append((stt, prompt, False, str(e)))
-	
-	# Báo cáo kết quả
-	successful = [r for r in results if r[2]]
-	failed = [r for r in results if not r[2]]
-	
-	print(f"\n=== KẾT QUẢ XỬ LÝ ===")
-	print(f"Thành công: {len(successful)}/{len(results)}")
-	print(f"Thất bại: {len(failed)}/{len(results)}")
-	
-	if successful:
-		print(f"\nCác file đã tạo thành công:")
-		for stt, prompt, _, filename in successful:
-			print(f"  STT {stt}: {filename}")
-	
-	if failed:
-		print(f"\nCác prompt thất bại:")
-		for stt, prompt, _, error in failed:
-			print(f"  STT {stt}: {error}")
-
-
-def process_single_image_batch(prompt: str, image_path: str, token: str, project_id: str, 
-                              model_key: str = "veo_3_i2v_s_fast_ultra", 
-                              max_workers: int = 5, output_dir: str = "output", 
-                              proxy: Optional[Dict[str, str]] = None,
-                              cookie_header_value: Optional[str] = None) -> None:
-	"""Xử lý một prompt + image duy nhất nhưng tạo nhiều video với đa luồng"""
-	
-	# Đọc cấu hình retry để hiển thị thông tin
-	config = _load_config()
-	retry_config = config.get("auto_retry", {})
-	enable_auto_retry = retry_config.get("enable_auto_retry", True)
-	max_retries = retry_config.get("max_retries", 3)
-	
-	# Tạo thư mục output nếu chưa có
-	os.makedirs(output_dir, exist_ok=True)
-	
-	# Tạo danh sách prompts giống nhau để xử lý song song
-	prompts = [(i+1, prompt, image_path) for i in range(max_workers)]
-	
-	print(f"Bắt đầu xử lý prompt '{prompt}' với image '{image_path}' và {max_workers} luồng...")
-	if enable_auto_retry:
-		print(f"🔄 Auto retry: BẬT (tối đa {max_retries} lần retry cho mỗi prompt)")
-	else:
-		print(f"🔄 Auto retry: TẮT")
-	
-	# Chuẩn bị arguments cho mỗi thread
-	args_list = [
-		(stt, prompt, image_path, token, project_id, model_key, output_dir, proxy, cookie_header_value)
-		for stt, prompt, image_path in prompts
-	]
-	
-	# Xử lý với ThreadPoolExecutor
-	results = []
-	with ThreadPoolExecutor(max_workers=max_workers) as executor:
-		# Submit tất cả tasks
-		future_to_args = {executor.submit(process_single_prompt, args): args for args in args_list}
-		
-		# Thu thập kết quả
-		for future in as_completed(future_to_args):
-			args = future_to_args[future]
-			try:
-				result = future.result()
-				results.append(result)
-			except Exception as e:
-				stt, prompt = args[0], args[1]
-				print(f"Lỗi không mong đợi với STT {stt}: {e}")
-				results.append((stt, prompt, False, str(e)))
-	
-	# Báo cáo kết quả
-	successful = [r for r in results if r[2]]
-	failed = [r for r in results if not r[2]]
-	
-	print(f"\n=== KẾT QUẢ XỬ LÝ ===")
-	print(f"Thành công: {len(successful)}/{len(results)}")
-	print(f"Thất bại: {len(failed)}/{len(results)}")
-	
-	if successful:
-		print(f"\nCác file đã tạo thành công:")
-		for stt, prompt, _, filename in successful:
-			print(f"  STT {stt}: {filename}")
-	
-	if failed:
-		print(f"\nCác prompt thất bại:")
-		for stt, prompt, _, error in failed:
-			print(f"  STT {stt}: {error}")
-
-
-def process_excel_batch(excel_file: str, token: str, project_id: str, 
-                       model_key: str = "veo_3_0_t2v_fast_ultra", 
-                       max_workers: int = 5, output_dir: str = "output", 
-                       require_image: bool = False, proxy: Optional[Dict[str, str]] = None, 
-                       cookie_header_value: Optional[str] = None) -> None:
-	"""Xử lý batch từ file Excel với đa luồng"""
-	
-	# Đọc cấu hình retry để hiển thị thông tin
-	config = _load_config()
-	retry_config = config.get("auto_retry", {})
-	enable_auto_retry = retry_config.get("enable_auto_retry", True)
-	max_retries = retry_config.get("max_retries", 3)
-	
-	# Tạo thư mục output nếu chưa có
-	os.makedirs(output_dir, exist_ok=True)
-	
-	# Đọc prompts từ Excel với kiểm tra image nếu cần
-	try:
-		prompts = read_excel_prompts(excel_file, require_image)
-	except SystemExit:
-		return  # Đã hiển thị lỗi và thoát trong read_excel_prompts
-	
-	if not prompts:
-		print("Không có prompt nào để xử lý")
-		return
-	
-	print(f"Bắt đầu xử lý {len(prompts)} prompt với {max_workers} luồng...")
-	if enable_auto_retry:
-		print(f"🔄 Auto retry: BẬT (tối đa {max_retries} lần retry cho mỗi prompt)")
-	else:
-		print(f"🔄 Auto retry: TẮT")
-	
-	# Chuẩn bị arguments cho mỗi thread
-	args_list = [
-		(stt, prompt, image_path, token, project_id, model_key, output_dir, proxy, cookie_header_value)
-		for stt, prompt, image_path in prompts
-	]
-	
-	# Xử lý với ThreadPoolExecutor
-	results = []
-	with ThreadPoolExecutor(max_workers=max_workers) as executor:
-		# Submit tất cả tasks
-		future_to_args = {executor.submit(process_single_prompt, args): args for args in args_list}
-		
-		# Thu thập kết quả
-		for future in as_completed(future_to_args):
-			args = future_to_args[future]
-			try:
-				result = future.result()
-				results.append(result)
-			except Exception as e:
-				stt, prompt = args[0], args[1]
-				print(f"Lỗi không mong đợi với STT {stt}: {e}")
-				results.append((stt, prompt, False, str(e)))
-	
-	# Báo cáo kết quả
-	successful = [r for r in results if r[2]]
-	failed = [r for r in results if not r[2]]
-	
-	print(f"\n=== KẾT QUẢ XỬ LÝ ===")
-	print(f"Thành công: {len(successful)}/{len(results)}")
-	print(f"Thất bại: {len(failed)}/{len(results)}")
-	
-	if successful:
-		print(f"\nCác file đã tạo thành công:")
-		for stt, prompt, _, filename in successful:
-			print(f"  STT {stt}: {filename}")
-	
-	if failed:
-		print(f"\nCác prompt thất bại:")
-		for stt, prompt, _, error in failed:
-			print(f"  STT {stt}: {error}")
 
