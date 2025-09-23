@@ -427,7 +427,13 @@ def generate_video(token: str, prompt: str, project_id: str, model_key: str = "v
 		if config_seed == 0:
 			seed = int(time.time()) % 65535
 		else:
-			seed = config_seed
+			seed = int(config_seed)
+	elif seed == 0:
+		# Nếu seed = 0, tạo random seed
+		seed = int(time.time()) % 65535
+	else:
+		# Đảm bảo seed là số nguyên
+		seed = int(seed)
 	
 	# Tạo scene_id ngẫu nhiên
 	scene_id = str(uuid.uuid4())
@@ -448,6 +454,7 @@ def generate_video(token: str, prompt: str, project_id: str, model_key: str = "v
 			}
 		]
 	}
+	
 	response = http_post_json(GENERATE_URL, payload, token, proxy)
 	return response, scene_id
 
@@ -461,7 +468,13 @@ def generate_video_from_image(token: str, prompt: str, media_id: str, project_id
 		if config_seed == 0:
 			seed = int(time.time()) % 65535
 		else:
-			seed = config_seed
+			seed = int(config_seed)
+	elif seed == 0:
+		# Nếu seed = 0, tạo random seed
+		seed = int(time.time()) % 65535
+	else:
+		# Đảm bảo seed là số nguyên
+		seed = int(seed)
 	
 	# Tạo scene_id ngẫu nhiên
 	scene_id = str(uuid.uuid4())
@@ -513,7 +526,13 @@ def upscale_video(token: str, video_media_id: str, project_id: str, scale: str =
 		if config_seed == 0:
 			seed = int(time.time()) % 65535
 		else:
-			seed = config_seed
+			seed = int(config_seed)
+	elif seed == 0:
+		# Nếu seed = 0, tạo random seed
+		seed = int(time.time()) % 65535
+	else:
+		# Đảm bảo seed là số nguyên
+		seed = int(seed)
 	
 	# Tạo scene_id ngẫu nhiên
 	scene_id = str(uuid.uuid4())

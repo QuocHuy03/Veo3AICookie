@@ -440,6 +440,175 @@ class VideoMergeThread(QThread):
             self.log_updated.emit(f"❌ Lỗi: {error_msg}")
             self.finished.emit(False, f"Lỗi: {error_msg}")
 
+class TestCookieThread(QThread):
+    """Thread để test cookie không block UI"""
+    result_ready = pyqtSignal(bool, str, str)  # success, message, expires
+    
+    def __init__(self, cookie_text):
+        super().__init__()
+        self.cookie_text = cookie_text
+    
+    def run(self):
+        try:
+            # Test cookie bằng cách gọi session API
+            headers = {
+                "Accept": "application/json",
+                "Cookie": self.cookie_text,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            response = requests.get("https://labs.google/fx/api/auth/session", 
+                                  headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                user_info = data.get("user", {})
+                user_name = user_info.get("name", "Unknown")
+                user_email = user_info.get("email", "Unknown")
+                
+                # Lấy thời gian expires
+                expires_str = data.get("expires", "")
+                expires_display = "Unknown"
+                if expires_str:
+                    try:
+                        # Parse thời gian UTC
+                        utc_time = datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
+                        # Chuyển sang giờ Việt Nam (UTC+7)
+                        from datetime import timezone, timedelta
+                        vn_time = utc_time.astimezone(timezone(timedelta(hours=7)))
+                        # Format theo định dạng Việt Nam
+                        expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
+                    except:
+                        expires_display = expires_str
+                
+                message = f"✅ Cookie hợp lệ!\n👤 {user_name}\n📧 {user_email}\n⏰ Hết hạn: {expires_display}"
+                self.result_ready.emit(True, message, expires_display)
+            else:
+                message = f"❌ Cookie không hợp lệ! HTTP {response.status_code}"
+                self.result_ready.emit(False, message, "Unknown")
+                
+        except requests.exceptions.Timeout:
+            message = "❌ Timeout! Kiểm tra kết nối mạng"
+            self.result_ready.emit(False, message, "Unknown")
+        except requests.exceptions.RequestException as e:
+            message = f"❌ Lỗi kết nối: {str(e)}"
+            self.result_ready.emit(False, message, "Unknown")
+        except Exception as e:
+            message = f"❌ Lỗi không xác định: {str(e)}"
+            self.result_ready.emit(False, message, "Unknown")
+
+
+class TestProxyThread(QThread):
+    """Thread để test proxy không block UI"""
+    result_ready = pyqtSignal(bool, str)  # success, message
+    
+    def __init__(self, proxy_str):
+        super().__init__()
+        self.proxy_str = proxy_str
+    
+    def run(self):
+        try:
+            if not self.proxy_str.strip():
+                self.result_ready.emit(True, "✅ Không sử dụng proxy")
+                return
+            
+            # Test proxy connection
+            proxies = {
+                'http': self.proxy_str,
+                'https': self.proxy_str
+            }
+            
+            response = requests.get("https://httpbin.org/ip", 
+                                  proxies=proxies, 
+                                  timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                ip = data.get('origin', 'Unknown')
+                message = f"✅ Proxy hoạt động - IP: {ip}"
+                self.result_ready.emit(True, message)
+            else:
+                message = f"❌ Proxy không hoạt động: HTTP {response.status_code}"
+                self.result_ready.emit(False, message)
+                
+        except Exception as e:
+            message = f"❌ Proxy không hoạt động: {str(e)}"
+            self.result_ready.emit(False, message)
+
+
+class CheckCookieThread(QThread):
+    """Thread để check cookie expiry không block UI"""
+    result_ready = pyqtSignal(bool, str, str, str)  # success, message, account_name, expires
+    
+    def __init__(self, cookie_text, account_name):
+        super().__init__()
+        self.cookie_text = cookie_text
+        self.account_name = account_name
+    
+    def run(self):
+        try:
+            # Test cookie bằng cách gọi session API
+            headers = {
+                "Accept": "application/json",
+                "Cookie": self.cookie_text,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            response = requests.get("https://labs.google/fx/api/auth/session", 
+                                  headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                user_info = data.get("user", {})
+                user_name = user_info.get("name", "Unknown")
+                user_email = user_info.get("email", "Unknown")
+                
+                # Lấy thời gian expires
+                expires_str = data.get("expires", "")
+                if expires_str:
+                    try:
+                        # Parse thời gian UTC
+                        from datetime import datetime, timezone, timedelta
+                        utc_time = datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
+                        # Chuyển sang giờ Việt Nam (UTC+7)
+                        vn_time = utc_time.astimezone(timezone(timedelta(hours=7)))
+                        current_time = datetime.now(timezone(timedelta(hours=7)))
+                        
+                        # Kiểm tra cookie có hết hạn không
+                        if vn_time <= current_time:
+                            # Cookie đã hết hạn
+                            expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
+                            message = f"⚠️ Cookie đã hết hạn!\n\nTài khoản: {self.account_name}\nEmail: {user_email}\nHết hạn: {expires_display}\n\nVui lòng truy cập web để lấy cookie mới."
+                            self.result_ready.emit(False, message, self.account_name, expires_display)
+                        else:
+                            # Cookie còn hiệu lực
+                            expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
+                            time_left = vn_time - current_time
+                            days_left = time_left.days
+                            hours_left = time_left.seconds // 3600
+                            
+                            if days_left > 0:
+                                time_info = f"{days_left} ngày {hours_left} giờ"
+                            else:
+                                time_info = f"{hours_left} giờ"
+                            
+                            message = f"✅ Cookie còn hiệu lực!\n\nTài khoản: {self.account_name}\nEmail: {user_email}\nHết hạn: {expires_display}\nCòn lại: {time_info}"
+                            self.result_ready.emit(True, message, self.account_name, expires_display)
+                    except Exception as e:
+                        message = f"❌ Lỗi parse thời gian!\n\nTài khoản: {self.account_name}\nLỗi: {str(e)}"
+                        self.result_ready.emit(False, message, self.account_name, "Unknown")
+                else:
+                    message = f"⚠️ Không có thông tin hết hạn!\n\nTài khoản: {self.account_name}\nEmail: {user_email}"
+                    self.result_ready.emit(True, message, self.account_name, "Unknown")
+            else:
+                message = f"❌ Cookie không hợp lệ!\n\nTài khoản: {self.account_name}\nHTTP: {response.status_code}"
+                self.result_ready.emit(False, message, self.account_name, "Unknown")
+                
+        except Exception as e:
+            message = f"❌ Lỗi khi kiểm tra cookie!\n\nTài khoản: {self.account_name}\nLỗi: {str(e)}\n\nVui lòng truy cập web để lấy cookie mới."
+            self.result_ready.emit(False, message, self.account_name, "Unknown")
+
+
 class AddCookieDialog(QDialog):
     """Dialog để thêm cookie mới"""
     def __init__(self, parent=None):
@@ -536,6 +705,12 @@ class AddCookieDialog(QDialog):
         self.cookie_edit.setPlaceholderText("Dán cookie từ trình duyệt vào đây...\n\nHướng dẫn:\n1. Mở Developer Tools (F12)\n2. Vào tab Application/Storage\n3. Copy cookie từ domain labs.google.com")
         form_layout.addRow(cookie_label, self.cookie_edit)
         
+        # Proxy field
+        proxy_label = QLabel("Proxy (Optional):")
+        self.proxy_edit = QLineEdit()
+        self.proxy_edit.setPlaceholderText("http://username:password@proxy:port hoặc http://proxy:port")
+        form_layout.addRow(proxy_label, self.proxy_edit)
+        
         layout.addLayout(form_layout)
         
         # Test section
@@ -543,7 +718,13 @@ class AddCookieDialog(QDialog):
         self.test_btn = QPushButton("Kiểm tra Cookie")
         self.test_btn.setObjectName("testBtn")
         self.test_btn.clicked.connect(self.test_cookie)
+        
+        self.test_proxy_btn = QPushButton("Kiểm tra Proxy")
+        self.test_proxy_btn.setObjectName("testBtn")
+        self.test_proxy_btn.clicked.connect(self.test_proxy)
+        
         test_layout.addWidget(self.test_btn)
+        test_layout.addWidget(self.test_proxy_btn)
         test_layout.addStretch()
         
         layout.addLayout(test_layout)
@@ -613,81 +794,32 @@ class AddCookieDialog(QDialog):
             }
         """)
             
-        try:
-            # Test cookie bằng cách gọi session API
-            headers = {
-                "Accept": "application/json",
-                "Cookie": cookie_text,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            response = requests.get("https://labs.google/fx/api/auth/session", 
-                                  headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                user_info = data.get("user", {})
-                user_name = user_info.get("name", "Unknown")
-                user_email = user_info.get("email", "Unknown")
-                
-                # Lấy thời gian expires
-                expires_str = data.get("expires", "")
-                expires_display = "Unknown"
-                if expires_str:
-                    try:
-                        # Parse thời gian UTC
-                        utc_time = datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
-                        # Chuyển sang giờ Việt Nam (UTC+7)
-                        from datetime import timezone, timedelta
-                        vn_time = utc_time.astimezone(timezone(timedelta(hours=7)))
-                        # Format theo định dạng Việt Nam
-                        expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
-                    except:
-                        expires_display = expires_str
-                
-                self.status_label.setText(f"Done - {user_name} ({user_email})")
-                self.status_label.setStyleSheet("""
-                    QLabel {
-                        color: #2e7d32;
-                        font-size: 12px;
-                        padding: 8px 12px;
-                        background-color: #e8f5e8;
-                        border-radius: 6px;
-                        border-left: 3px solid #4caf50;
-                    }
-                """)
-                
-                # Auto fill name if empty
-                if not self.name_edit.text():
-                    self.name_edit.setText(user_name)
-                    
-                # Enable button và reset text
-                self.test_btn.setEnabled(True)
-                self.test_btn.setText("Kiểm tra Cookie")
-                
-                # Lưu expires vào data để hiển thị trong table
-                self.expires_data = expires_display
-                    
-                if "email" in cookie_text.lower():
-                    print(f"Debug - Found 'email' in cookie")
-                else:
-                    print(f"Debug - No 'email' found in cookie")
-                    
-            else:
-                self.status_label.setText(f"Error HTTP {response.status_code}")
-                self.status_label.setStyleSheet("""
-                    QLabel {
-                        color: #c62828;
-                        font-size: 12px;
-                        padding: 8px 12px;
-                        background-color: #ffebee;
-                        border-radius: 6px;
-                        border-left: 3px solid #f44336;
-                    }
-                """)
-                
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
+        # Chạy test cookie trong background thread
+        self.test_cookie_thread = TestCookieThread(cookie_text)
+        self.test_cookie_thread.result_ready.connect(self.on_cookie_test_result)
+        self.test_cookie_thread.start()
+    
+    def on_cookie_test_result(self, success, message, expires):
+        """Xử lý kết quả test cookie"""
+        # Enable lại button
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("Kiểm tra Cookie")
+        
+        # Cập nhật status
+        self.status_label.setText(message)
+        if success:
+            self.expires_data = expires
+            self.status_label.setStyleSheet("""
+                QLabel {
+                    color: #2e7d32;
+                    font-size: 12px;
+                    padding: 8px 12px;
+                    background-color: #e8f5e8;
+                    border-radius: 6px;
+                    border-left: 3px solid #4caf50;
+                }
+            """)
+        else:
             self.status_label.setStyleSheet("""
                 QLabel {
                     color: #c62828;
@@ -698,17 +830,115 @@ class AddCookieDialog(QDialog):
                     border-left: 3px solid #f44336;
                 }
             """)
-            
-        finally:
-            # Luôn enable lại button và reset text
-            self.test_btn.setEnabled(True)
-            self.test_btn.setText("Kiểm tra Cookie")
+    
+    def validate_proxy(self, proxy_str):
+        """Validate proxy format"""
+        if not proxy_str.strip():
+            return True, None  # Empty proxy is OK
+        
+        proxy_str = proxy_str.strip()
+        
+        # Check basic format
+        if not (proxy_str.startswith('http://') or proxy_str.startswith('https://') or 
+                proxy_str.startswith('socks4://') or proxy_str.startswith('socks5://')):
+            return False, "Proxy phải bắt đầu với http://, https://, socks4:// hoặc socks5://"
+        
+        # Check if it has port
+        if ':' not in proxy_str.split('://')[1]:
+            return False, "Proxy phải có port (ví dụ: http://proxy:8080)"
+        
+        return True, None
+    
+    def test_proxy(self):
+        """Test proxy connection"""
+        proxy_str = self.proxy_edit.text().strip()
+        
+        # Validate format first
+        is_valid, error_msg = self.validate_proxy(proxy_str)
+        if not is_valid:
+            self.status_label.setText(f"❌ Proxy không hợp lệ: {error_msg}")
+            self.status_label.setStyleSheet("""
+                QLabel {
+                    color: #c62828;
+                    font-size: 12px;
+                    padding: 8px 12px;
+                    background-color: #ffebee;
+                    border-radius: 6px;
+                    border-left: 3px solid #f44336;
+                }
+            """)
+            return
+        
+        if not proxy_str:
+            self.status_label.setText("✅ Không sử dụng proxy")
+            self.status_label.setStyleSheet("""
+                QLabel {
+                    color: #2e7d32;
+                    font-size: 12px;
+                    padding: 8px 12px;
+                    background-color: #e8f5e8;
+                    border-radius: 6px;
+                    border-left: 3px solid #4caf50;
+                }
+            """)
+            return
+        
+        # Disable button và hiển thị đang xử lý
+        self.test_proxy_btn.setEnabled(False)
+        self.test_proxy_btn.setText("⏳ Đang xử lý...")
+        self.status_label.setText("Đang kiểm tra proxy...")
+        self.status_label.setStyleSheet("""
+            QLabel {
+                color: #1976d2;
+                font-size: 12px;
+                padding: 8px 12px;
+                background-color: #e3f2fd;
+                border-radius: 6px;
+                border-left: 3px solid #2196f3;
+            }
+        """)
+        
+        # Chạy test proxy trong background thread
+        self.test_proxy_thread = TestProxyThread(proxy_str)
+        self.test_proxy_thread.result_ready.connect(self.on_proxy_test_result)
+        self.test_proxy_thread.start()
+    
+    def on_proxy_test_result(self, success, message):
+        """Xử lý kết quả test proxy"""
+        # Enable lại button
+        self.test_proxy_btn.setEnabled(True)
+        self.test_proxy_btn.setText("Kiểm tra Proxy")
+        
+        # Cập nhật status
+        self.status_label.setText(message)
+        if success:
+            self.status_label.setStyleSheet("""
+                QLabel {
+                    color: #2e7d32;
+                    font-size: 12px;
+                    padding: 8px 12px;
+                    background-color: #e8f5e8;
+                    border-radius: 6px;
+                    border-left: 3px solid #4caf50;
+                }
+            """)
+        else:
+            self.status_label.setStyleSheet("""
+                QLabel {
+                    color: #c62828;
+                    font-size: 12px;
+                    padding: 8px 12px;
+                    background-color: #ffebee;
+                    border-radius: 6px;
+                    border-left: 3px solid #f44336;
+                }
+            """)
     
     def get_data(self):
-        """Lấy dữ liệu từ dialog"""
         return {
             "name": self.name_edit.text().strip(),
             "cookie": self.cookie_edit.toPlainText().strip(),
+            "proxy": self.proxy_edit.text().strip(),
             "status": self.status_label.text(),
             "expires": getattr(self, 'expires_data', 'Unknown'),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -811,6 +1041,15 @@ class VideoProcessingThread(QThread):
             cookie_header_value = account_data["cookie"]
             account_name = account_data.get("name", "Unknown")
             
+            # Lấy proxy từ account data
+            proxy_str = account_data.get("proxy", "").strip()
+            proxy = None
+            if proxy_str:
+                proxy = {
+                    'http': proxy_str,
+                    'https': proxy_str
+                }
+            
             # Kiểm tra cookie có hợp lệ không
             if not cookie_header_value or cookie_header_value.startswith("YOUR_COOKIE_HERE"):
                 return (stt, prompt, False, f"Cookie không hợp lệ cho {account_name}")
@@ -835,13 +1074,15 @@ class VideoProcessingThread(QThread):
                     model_key = "veo_3_i2v_s_fast_ultra"
                     
                 self.status_updated.emit(f"STT {stt}: 📤 Uploading image...")
-                media_id = upload_image(token, image_path)
+                media_id = upload_image(token, image_path, proxy)
                 self.status_updated.emit(f"STT {stt}: 🎬 Generating video from image...")
                 gen_resp, scene_id = generate_video_from_image(
                     token, prompt, media_id, 
                     self.config["project_id"], 
                     model_key,
-                    self.config["aspect_ratio"]
+                    self.config["aspect_ratio"],
+                    self.config.get("seed"),
+                    proxy
                 )
             else:
                 print("Vào text rồi nè cu hề")
@@ -856,7 +1097,9 @@ class VideoProcessingThread(QThread):
                     token, prompt, 
                     self.config["project_id"], 
                     model_key,
-                    self.config["aspect_ratio"]
+                    self.config["aspect_ratio"],
+                    self.config.get("seed"),
+                    proxy
                 )
             
             
@@ -869,7 +1112,7 @@ class VideoProcessingThread(QThread):
             
             try:
                 # poll_status sẽ tự động poll cho đến khi SUCCESSFUL hoặc FAILED
-                status_resp = poll_status(token, op_name, scene_id, interval_sec=2.0, timeout_sec=600)
+                status_resp = poll_status(token, op_name, scene_id, interval_sec=2.0, timeout_sec=600, proxy=proxy)
                 self.status_updated.emit(f"STT {stt}: ✅ Status: SUCCESSFUL - Thành công, đang tải...")
             except RuntimeError as e:
                 self.status_updated.emit(f"STT {stt}: ❌ Status: FAILED - Thất bại!")
@@ -902,13 +1145,15 @@ class VideoProcessingThread(QThread):
                         token, video_media_id, 
                         self.config["project_id"], 
                         "1080p",
-                        self.config["aspect_ratio"]
+                        self.config["aspect_ratio"],
+                        self.config.get("seed"),
+                        proxy
                     )
                     
                     # Poll upscale status
                     upscale_op_name = extract_op_name(upscale_resp)
                     self.status_updated.emit(f"STT {stt}: ⏳ Waiting for upscale...")
-                    upscale_status_resp = poll_status(token, upscale_op_name, upscale_scene_id, interval_sec=2.0, timeout_sec=600)
+                    upscale_status_resp = poll_status(token, upscale_op_name, upscale_scene_id, interval_sec=2.0, timeout_sec=600, proxy=proxy)
                     
                     # Lấy mediaId từ upscale response
                     upscale_media_id = extract_upscale_media_id(upscale_status_resp)
@@ -917,7 +1162,7 @@ class VideoProcessingThread(QThread):
                     
                     # Lấy encodedVideo từ mediaId
                     self.status_updated.emit(f"STT {stt}: 📥 Getting encoded video...")
-                    encoded_video = get_encoded_video(token, upscale_media_id)
+                    encoded_video = get_encoded_video(token, upscale_media_id, proxy)
                     if not encoded_video:
                         raise ValueError("Không thể lấy encodedVideo từ mediaId")
                     
@@ -982,6 +1227,15 @@ class VideoProcessingThread(QThread):
             # Lấy token từ cookie của tài khoản được chỉ định
             cookie_header_value = account_data["cookie"]
             
+            # Lấy proxy từ account data
+            proxy_str = account_data.get("proxy", "").strip()
+            proxy = None
+            if proxy_str:
+                proxy = {
+                    'http': proxy_str,
+                    'https': proxy_str
+                }
+            
             # Kiểm tra cookie có hợp lệ không
             if not cookie_header_value or cookie_header_value.startswith("YOUR_COOKIE_HERE"):
                 return (stt, prompt, False, f"Cookie không hợp lệ cho {account_name}")
@@ -1016,7 +1270,7 @@ class VideoProcessingThread(QThread):
                     model_key = "veo_3_i2v_s_fast_ultra"
                     
                 self.status_updated.emit(f"STT {stt}: 📤 Uploading image với {account_name}...")
-                media_id = upload_image(token, image_path)
+                media_id = upload_image(token, image_path, proxy)
                 
                 # Kiểm tra should_stop sau khi upload
                 if self.should_stop:
@@ -1027,7 +1281,9 @@ class VideoProcessingThread(QThread):
                     token, prompt, media_id, 
                     self.config["project_id"], 
                     model_key,
-                    self.config["aspect_ratio"]
+                    self.config["aspect_ratio"],
+                    self.config.get("seed"),
+                    proxy
                 )
             else:
                 # Kiểm tra should_stop trước khi generate
@@ -1045,7 +1301,9 @@ class VideoProcessingThread(QThread):
                     token, prompt, 
                     self.config["project_id"], 
                     model_key,
-                    self.config["aspect_ratio"]
+                    self.config["aspect_ratio"],
+                    self.config.get("seed"),
+                    proxy
                 )
          
             # Poll status với retry logic tối ưu
@@ -1057,7 +1315,7 @@ class VideoProcessingThread(QThread):
             base_delay = 2.0
             for attempt in range(max_retries):
                 try:
-                    status_resp = poll_status(token, op_name, scene_id, interval_sec=base_delay, timeout_sec=300)
+                    status_resp = poll_status(token, op_name, scene_id, interval_sec=base_delay, timeout_sec=300, proxy=proxy)
                     self.status_updated.emit(f"STT {stt}: ✅ Status: SUCCESSFUL với {account_name} - đang tải...")
                     break
                 except RuntimeError as e:
@@ -1104,13 +1362,15 @@ class VideoProcessingThread(QThread):
                         token, video_media_id, 
                         self.config["project_id"], 
                         "1080p",
-                        self.config["aspect_ratio"]
+                        self.config["aspect_ratio"],
+                        self.config.get("seed"),
+                        proxy
                     )
                     
                     # Poll upscale status
                     upscale_op_name = extract_op_name(upscale_resp)
                     self.status_updated.emit(f"STT {stt}: ⏳ Waiting for upscale...")
-                    upscale_status_resp = poll_status(token, upscale_op_name, upscale_scene_id, interval_sec=2.0, timeout_sec=600)
+                    upscale_status_resp = poll_status(token, upscale_op_name, upscale_scene_id, interval_sec=2.0, timeout_sec=600, proxy=proxy)
                     
                     # Lấy mediaId từ upscale response
                     upscale_media_id = extract_upscale_media_id(upscale_status_resp)
@@ -1119,7 +1379,7 @@ class VideoProcessingThread(QThread):
                     
                     # Lấy encodedVideo từ mediaId
                     self.status_updated.emit(f"STT {stt}: 📥 Getting encoded video...")
-                    encoded_video = get_encoded_video(token, upscale_media_id)
+                    encoded_video = get_encoded_video(token, upscale_media_id, proxy)
                     if not encoded_video:
                         raise ValueError("Không thể lấy encodedVideo từ mediaId")
                     
@@ -1339,8 +1599,8 @@ class MainWindow(QMainWindow):
         
         # Table
         self.account_table = QTableWidget()
-        self.account_table.setColumnCount(5)
-        self.account_table.setHorizontalHeaderLabels(["NAME", "EMAIL", "STATUS", "EXPIRES", "ACTION"])
+        self.account_table.setColumnCount(6)
+        self.account_table.setHorizontalHeaderLabels(["NAME", "EMAIL", "STATUS", "EXPIRES", "PROXY", "ACTION"])
         self.account_table.horizontalHeader().setStretchLastSection(True)
         # Styling table
         self.account_table.setStyleSheet("""
@@ -1503,6 +1763,9 @@ class MainWindow(QMainWindow):
         self.aspect_ratio_combo.setCurrentIndex(0)  # Default to landscape
         config_layout.addRow("Aspect Ratio:", self.aspect_ratio_combo)
         
+        # Kết nối signal để cập nhật resolution combo khi aspect ratio thay đổi
+        self.aspect_ratio_combo.currentTextChanged.connect(self.update_resolution_options)
+        
         # Resolution selection
         self.resolution_combo = QComboBox()
         self.resolution_combo.addItems([
@@ -1515,6 +1778,9 @@ class MainWindow(QMainWindow):
         
         config_group.setLayout(config_layout)
         left_layout.addWidget(config_group)
+        
+        # Gọi hàm cập nhật resolution options lần đầu
+        self.update_resolution_options()
         
         # Group: File Excel
         file_group = QGroupBox("File Excel")
@@ -2175,10 +2441,10 @@ class MainWindow(QMainWindow):
             
             # Trạng thái đơn giản
             status = account.get("status", "Unknown")
-            if "Done" in status:
+            if "Done" in status or "✅" in status or "Cookie hợp lệ" in status:
                 status_display = "Done"
                 status_color = Qt.darkGreen
-            elif "Error" in status:
+            elif "Error" in status or "❌" in status or "Cookie không hợp lệ" in status:
                 status_display = "Error"
                 status_color = Qt.darkRed
             else:
@@ -2221,6 +2487,27 @@ class MainWindow(QMainWindow):
                 expires_item.setForeground(Qt.darkGray)
                 
             self.account_table.setItem(i, 3, expires_item)
+            
+            # Proxy
+            proxy_text = account.get("proxy", "")
+            if proxy_text:
+                # Truncate long proxy URLs for display
+                if len(proxy_text) > 30:
+                    proxy_display = proxy_text[:27] + "..."
+                else:
+                    proxy_display = proxy_text
+            else:
+                proxy_display = "None"
+                
+            proxy_item = QTableWidgetItem(proxy_display)
+            proxy_item.setFont(QFont("Roboto", 9))
+            proxy_item.setTextAlignment(Qt.AlignCenter)
+            if proxy_text:
+                proxy_item.setForeground(Qt.darkBlue)
+                proxy_item.setToolTip(proxy_text)  # Show full proxy on hover
+            else:
+                proxy_item.setForeground(Qt.darkGray)
+            self.account_table.setItem(i, 4, proxy_item)
             
             # Container cho các nút action
             action_widget = QWidget()
@@ -2273,7 +2560,7 @@ class MainWindow(QMainWindow):
             action_layout.addWidget(checker_btn)
             action_layout.addWidget(delete_btn)
             action_widget.setLayout(action_layout)
-            self.account_table.setCellWidget(i, 4, action_widget)
+            self.account_table.setCellWidget(i, 5, action_widget)
             
         # Auto resize columns và set column widths
         self.account_table.resizeColumnsToContents()
@@ -2284,7 +2571,8 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(1, header.Stretch)  # EMAIL  
         header.setSectionResizeMode(2, header.ResizeToContents)  # STATUS
         header.setSectionResizeMode(3, header.ResizeToContents)  # EXPIRES
-        header.setSectionResizeMode(4, header.ResizeToContents)  # ACTION
+        header.setSectionResizeMode(4, header.Stretch)  # PROXY
+        header.setSectionResizeMode(5, header.ResizeToContents)  # ACTION
             
     def delete_account(self, row):
         """Xóa tài khoản tại row được chỉ định"""
@@ -2376,74 +2664,17 @@ class MainWindow(QMainWindow):
             create_styled_messagebox(self, "Lỗi", f"Cookie không hợp lệ cho tài khoản {account_name}").exec_()
             return
         
-        try:
-            # Test cookie bằng cách gọi session API
-            headers = {
-                "Accept": "application/json",
-                "Cookie": cookie_text,
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            response = requests.get("https://labs.google/fx/api/auth/session", 
-                                  headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                user_info = data.get("user", {})
-                user_name = user_info.get("name", "Unknown")
-                user_email = user_info.get("email", "Unknown")
-                
-                # Lấy thời gian expires
-                expires_str = data.get("expires", "")
-                if expires_str:
-                    try:
-                        # Parse thời gian UTC
-                        from datetime import datetime, timezone, timedelta
-                        utc_time = datetime.fromisoformat(expires_str.replace('Z', '+00:00'))
-                        # Chuyển sang giờ Việt Nam (UTC+7)
-                        vn_time = utc_time.astimezone(timezone(timedelta(hours=7)))
-                        current_time = datetime.now(timezone(timedelta(hours=7)))
-                        
-                        # Kiểm tra cookie có hết hạn không
-                        if vn_time <= current_time:
-                            # Cookie đã hết hạn
-                            expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
-                            message = f"⚠️ Cookie đã hết hạn!\n\nTài khoản: {account_name}\nEmail: {user_email}\nHết hạn: {expires_display}\n\nVui lòng truy cập web để lấy cookie mới."
-                            create_styled_messagebox(self, "Cookie Hết Hạn", message, QMessageBox.Critical).exec_()
-                        else:
-                            # Cookie còn hiệu lực
-                            expires_display = vn_time.strftime("%d/%m/%Y %H:%M:%S")
-                            time_left = vn_time - current_time
-                            days_left = time_left.days
-                            hours_left = time_left.seconds // 3600
-                            
-                            if days_left > 0:
-                                time_info = f"{days_left} ngày {hours_left} giờ"
-                            else:
-                                time_info = f"{hours_left} giờ"
-                            
-                            message = f"✅ Cookie còn hiệu lực!\n\nTài khoản: {account_name}\nEmail: {user_email}\nHết hạn: {expires_display}\nCòn lại: {time_info}"
-                            create_styled_messagebox(self, "Cookie Hợp Lệ", message).exec_()
-                    except Exception as e:
-                        message = f"Cookie hợp lệ nhưng không thể parse thời gian hết hạn.\n\nTài khoản: {account_name}\nEmail: {user_email}\nExpires: {expires_str}"
-                        create_styled_messagebox(self, "Cookie Hợp Lệ", message).exec_()
-                else:
-                    message = f"Cookie hợp lệ nhưng không có thông tin thời gian hết hạn.\n\nTài khoản: {account_name}\nEmail: {user_email}"
-                    create_styled_messagebox(self, "Cookie Hợp Lệ", message).exec_()
-            else:
-                # Cookie không hợp lệ hoặc hết hạn
-                message = f"❌ Cookie không hợp lệ hoặc đã hết hạn!\n\nTài khoản: {account_name}\nStatus Code: {response.status_code}\n\nVui lòng truy cập web để lấy cookie mới."
-                create_styled_messagebox(self, "Cookie Không Hợp Lệ", message, QMessageBox.Critical).exec_()
-                
-        except requests.exceptions.Timeout:
-            message = f"⏳ Timeout khi kiểm tra cookie!\n\nTài khoản: {account_name}\n\nVui lòng kiểm tra kết nối mạng và thử lại."
-            create_styled_messagebox(self, "Timeout", message).exec_()
-        except requests.exceptions.ConnectionError:
-            message = f"📡 Không thể kết nối!\n\nTài khoản: {account_name}\n\nVui lòng kiểm tra kết nối mạng và thử lại."
-            create_styled_messagebox(self, "Lỗi Kết Nối", message).exec_()
-        except Exception as e:
-            message = f"❌ Lỗi khi kiểm tra cookie!\n\nTài khoản: {account_name}\nLỗi: {str(e)}\n\nVui lòng truy cập web để lấy cookie mới."
-            create_styled_messagebox(self, "Lỗi", message, QMessageBox.Critical).exec_()
+        # Chạy check cookie trong background thread
+        self.check_cookie_thread = CheckCookieThread(cookie_text, account_name)
+        self.check_cookie_thread.result_ready.connect(self.on_check_cookie_result)
+        self.check_cookie_thread.start()
+    
+    def on_check_cookie_result(self, success, message, account_name, expires):
+        """Xử lý kết quả check cookie"""
+        if success:
+            create_styled_messagebox(self, "Cookie Status", message, QMessageBox.Information).exec_()
+        else:
+            create_styled_messagebox(self, "Cookie Hết Hạn", message, QMessageBox.Critical).exec_()
 
     def refresh_accounts(self):
         """Làm mới danh sách accounts"""
@@ -2473,7 +2704,7 @@ class MainWindow(QMainWindow):
             return
         
         # Đếm số tài khoản active
-        active_accounts = [acc for acc in self.accounts if "Done" in acc.get("status", "")]
+        active_accounts = [acc for acc in self.accounts if "Done" in acc.get("status", "") or "✅" in acc.get("status", "") or "Cookie hợp lệ" in acc.get("status", "")]
         total_accounts = len(self.accounts)
         active_count = len(active_accounts)
         
@@ -2503,7 +2734,40 @@ class MainWindow(QMainWindow):
                     border-left: 4px solid #4caf50;
                 }
             """)
+    
+    def update_resolution_options(self):
+        """Cập nhật tùy chọn resolution dựa trên aspect ratio"""
+        aspect_ratio_text = self.aspect_ratio_combo.currentText()
         
+        # Lưu lại lựa chọn hiện tại
+        current_selection = self.resolution_combo.currentText()
+        
+        # Xóa tất cả items
+        self.resolution_combo.clear()
+        
+        if aspect_ratio_text == "16:9":
+            # Landscape: có cả 720p và 1080p
+            self.resolution_combo.addItems([
+                "720p (Standard)",
+                "1080p (Upscale)"
+            ])
+            self.resolution_combo.setToolTip("720p: Generate trực tiếp\n1080p: Generate 720p rồi upscale lên 1080p")
+        else:  # 9:16
+            # Portrait: chỉ có 720p
+            self.resolution_combo.addItems([
+                "720p (Standard)"
+            ])
+            self.resolution_combo.setToolTip("720p: Generate trực tiếp\n1080p không khả dụng cho tỷ lệ 9:16")
+        
+        # Khôi phục lựa chọn nếu có thể, nếu không thì chọn 720p
+        if current_selection in ["720p (Standard)", "1080p (Upscale)"]:
+            try:
+                index = [item for item in ["720p (Standard)", "1080p (Upscale)"] if item in [self.resolution_combo.itemText(i) for i in range(self.resolution_combo.count())]].index(current_selection)
+                self.resolution_combo.setCurrentIndex(index)
+            except (ValueError, IndexError):
+                self.resolution_combo.setCurrentIndex(0)  # Default to 720p
+        else:
+            self.resolution_combo.setCurrentIndex(0)  # Default to 720p
                 
     def browse_excel(self):
         """Chọn file Excel"""
@@ -2680,8 +2944,9 @@ class MainWindow(QMainWindow):
                 if image_item and image_item.text() not in ["None", "❌ Not found"]:
                     # Use full path directly from table (already stored as full path)
                     image_path = image_item.text()
-                if not os.path.exists(image_path):
-                    pass
+                    # Verify the image path exists
+                    if not os.path.exists(image_path):
+                        image_path = None
                     
                 prompts.append((stt, prompt, image_path))
                 
@@ -2703,7 +2968,8 @@ class MainWindow(QMainWindow):
         
         # Get resolution from combo box
         resolution_text = self.resolution_combo.currentText()
-        use_upscale = "1080p" in resolution_text
+        # Chỉ cho phép upscale 1080p khi aspect ratio là 16:9 (landscape)
+        use_upscale = "1080p" in resolution_text and aspect_ratio == "VIDEO_ASPECT_RATIO_LANDSCAPE"
             
         config = {
             "project_id": self.project_id_edit.text(),
