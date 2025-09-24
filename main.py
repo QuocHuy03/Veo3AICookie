@@ -148,7 +148,7 @@ class ProcessingResultDialog(QDialog):
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 10px;
-                font-family: "Roboto", "Open Sans", "Segoe UI";
+                font-family: "Open Sans", "Segoe UI", "Arial";
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -167,7 +167,7 @@ class ProcessingResultDialog(QDialog):
                 border: 1px solid #e0e0e0;
                 border-radius: 5px;
                 background-color: white;
-                font-family: "Roboto", "Open Sans", "Segoe UI";
+                font-family: "Open Sans", "Segoe UI", "Arial";
                 font-size: 12px;
                 padding: 5px;
             }
@@ -266,46 +266,19 @@ class ProcessingResultDialog(QDialog):
                 self.parent_window.retry_failed_videos(failed_videos)
 
 class VideoMergeThread(QThread):
-    """Thread để ghép video không block UI"""
+    """Thread để ghép video không block UI - chỉ concat đơn giản"""
     progress_updated = pyqtSignal(int, str)  # progress, message
     log_updated = pyqtSignal(str)  # log message
     finished = pyqtSignal(bool, str)  # success, message
     
-    def __init__(self, video_paths, output_path, mute_audio=False):
+    def __init__(self, video_paths, output_path):
         super().__init__()
         self.video_paths = video_paths
         self.output_path = output_path
-        self.mute_audio = mute_audio
-        
-    def _check_audio_streams(self):
-        """Check if all videos have audio streams"""
-        import subprocess
-        import platform
-        
-        startupinfo = None
-        if platform.system() == "Windows":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-        
-        for video_path in self.video_paths:
-            try:
-                # Use ffprobe to check streams
-                cmd = ["ffprobe", "-v", "quiet", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path]
-                result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-                
-                # If no audio streams found, return False
-                if not result.stdout.strip():
-                    return False
-            except:
-                # If ffprobe fails, assume no audio for safety
-                return False
-        
-        return True
         
     def run(self):
         try:
-            self.log_updated.emit(f"🚀 Bắt đầu ghép {len(self.video_paths)} video (không có transition)...")
+            self.log_updated.emit(f"🚀 Bắt đầu ghép {len(self.video_paths)} video...")
             self.progress_updated.emit(10, "Đang chuẩn bị...")
             
             # Validate video files exist
@@ -316,51 +289,32 @@ class VideoMergeThread(QThread):
                     return
             
             self.log_updated.emit("✅ Tất cả video files hợp lệ")
-            self.progress_updated.emit(20, "Đang chuẩn bị FFmpeg...")
+            self.progress_updated.emit(30, "Đang ghép video...")
             
-            # Check if all videos have audio streams (for better error handling)
-            has_audio_streams = self._check_audio_streams()
-            
-            # Build FFmpeg command - always no transitions for clean merging
+            # Sử dụng phương pháp concat đơn giản nhất - video-only để tránh lỗi audio
             cmd = ["ffmpeg", "-y"]  # -y để overwrite output file
             
             # Add input files
             for video_path in self.video_paths:
                 cmd.extend(["-i", video_path])
             
-            # Add filter complex for concatenation with better error handling
-            if self.mute_audio or not has_audio_streams:
-                # Only video concatenation, no audio
-                self.log_updated.emit("🔇 Ghép video không có âm thanh")
-                filter_parts = []
-                for i in range(len(self.video_paths)):
-                    filter_parts.append(f"[{i}:v]")
-                
-                video_filter = f"{''.join(filter_parts)}concat=n={len(self.video_paths)}:v=1:a=0[outv]"
-                cmd.extend(["-filter_complex", video_filter])
-                cmd.extend(["-map", "[outv]"])
-            else:
-                # Both video and audio concatenation
-                self.log_updated.emit("🔊 Ghép video có âm thanh")
-                filter_parts = []
-                for i in range(len(self.video_paths)):
-                    filter_parts.append(f"[{i}:v][{i}:a]")
-                
-                filter_complex = f"{''.join(filter_parts)}concat=n={len(self.video_paths)}:v=1:a=1[outv][outa]"
-                cmd.extend(["-filter_complex", filter_complex])
-                cmd.extend(["-map", "[outv]", "-map", "[outa]"])
+            # Concat filter đơn giản - chỉ video để tránh lỗi audio
+            filter_parts = []
+            for i in range(len(self.video_paths)):
+                filter_parts.append(f"[{i}:v]")
             
-            # Output settings with better compatibility - optimized for clean merging
-            cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
-            if not self.mute_audio and has_audio_streams:
-                cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+            video_filter = f"{''.join(filter_parts)}concat=n={len(self.video_paths)}:v=1:a=0[outv]"
+            cmd.extend(["-filter_complex", video_filter])
+            cmd.extend(["-map", "[outv]"])
             
+            # Output settings đơn giản
+            cmd.extend(["-c:v", "libx264", "-preset", "ultrafast"])  # ultrafast để nhanh và ít lỗi
             cmd.append(self.output_path)
             
-            self.log_updated.emit("📝 Command: ********************************")
-            self.progress_updated.emit(30, "Đang ghép video...")
+            self.log_updated.emit("📝 Đang chạy FFmpeg (video-only)...")
+            self.progress_updated.emit(60, "Đang ghép video...")
             
-            # Execute FFmpeg with fallback mechanism
+            # Execute FFmpeg
             import subprocess
             import platform
             
@@ -371,66 +325,16 @@ class VideoMergeThread(QThread):
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE
             
-            # Try the first command
-            self.log_updated.emit(f"🔧 Đang chạy FFmpeg command...")
             result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-            
-            # Debug logging
-            self.log_updated.emit(f"🔍 FFmpeg return code: {result.returncode}")
-            self.log_updated.emit(f"🔍 FFmpeg stderr length: {len(result.stderr) if result.stderr else 0}")
-            self.log_updated.emit(f"🔍 FFmpeg stdout length: {len(result.stdout) if result.stdout else 0}")
-            
-            # If failed and not muted audio, try video-only fallback
-            if result.returncode != 0 and not self.mute_audio and has_audio_streams:
-                self.log_updated.emit("⚠️ Thử lại với video-only (bỏ qua audio)...")
-                
-                # Build fallback command (video only)
-                cmd_fallback = ["ffmpeg", "-y"]
-                for video_path in self.video_paths:
-                    cmd_fallback.extend(["-i", video_path])
-                
-                # Video-only concatenation
-                filter_parts = []
-                for i in range(len(self.video_paths)):
-                    filter_parts.append(f"[{i}:v]")
-                
-                video_filter = f"{''.join(filter_parts)}concat=n={len(self.video_paths)}:v=1:a=0[outv]"
-                cmd_fallback.extend(["-filter_complex", video_filter])
-                cmd_fallback.extend(["-map", "[outv]"])
-                cmd_fallback.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
-                cmd_fallback.append(self.output_path)
-                
-                result = subprocess.run(cmd_fallback, capture_output=True, text=True, startupinfo=startupinfo)
             
             if result.returncode == 0:
                 self.progress_updated.emit(100, "Hoàn thành!")
                 self.log_updated.emit("✅ Ghép video thành công!")
                 self.finished.emit(True, f"Đã ghép video thành công!\nFile: {self.output_path}")
             else:
-                # Extract meaningful error from FFmpeg output
-                stderr_text = result.stderr if result.stderr else ""
-                stdout_text = result.stdout if result.stdout else ""
-                
-                error_lines = stderr_text.split('\n') if stderr_text else []
-                meaningful_error = ""
-                
-                for line in error_lines:
-                    if any(keyword in line.lower() for keyword in ['error', 'failed', 'invalid', 'cannot']):
-                        meaningful_error += line + "\n"
-                
-                if not meaningful_error:
-                    # Try to get error from stdout if stderr is empty
-                    if stdout_text:
-                        stdout_lines = stdout_text.split('\n')
-                        for line in stdout_lines:
-                            if any(keyword in line.lower() for keyword in ['error', 'failed', 'invalid', 'cannot']):
-                                meaningful_error += line + "\n"
-                    
-                    if not meaningful_error:
-                        meaningful_error = stderr_text[:300] + "..." if stderr_text else "Lỗi không xác định từ FFmpeg"
-                
-                self.log_updated.emit(f"❌ Lỗi ghép video: {meaningful_error[:200]}...")
-                self.finished.emit(False, f"Lỗi ghép video:\n{meaningful_error}")
+                error_msg = result.stderr if result.stderr else "Lỗi không xác định từ FFmpeg"
+                self.log_updated.emit(f"❌ Lỗi ghép video: {error_msg[:200]}...")
+                self.finished.emit(False, f"Lỗi ghép video:\n{error_msg}")
                 
         except FileNotFoundError:
             self.log_updated.emit("❌ Không tìm thấy FFmpeg!")
@@ -1653,7 +1557,7 @@ class MainWindow(QMainWindow):
         self.account_table.setEditTriggers(QTableWidget.NoEditTriggers)
         
         # Set minimum row height for better appearance
-        self.account_table.verticalHeader().setDefaultSectionSize(40)
+        self.account_table.verticalHeader().setDefaultSectionSize(45)
         
         layout.addWidget(self.account_table)
         
@@ -1856,11 +1760,10 @@ class MainWindow(QMainWindow):
         self.excel_table.verticalHeader().setVisible(False)
         self.excel_table.setShowGrid(True)
         self.excel_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.excel_table.setMaximumHeight(200)
         
-        preview_layout.addWidget(self.excel_table)
+        preview_layout.addWidget(self.excel_table, 1)  # Thêm stretch factor = 1 để bảng có thể mở rộng
         preview_group.setLayout(preview_layout)
-        left_layout.addWidget(preview_group)
+        left_layout.addWidget(preview_group, 1)  # Thêm stretch factor = 1 để group có thể mở rộng
         
         # Group: Output
         output_group = QGroupBox("Output")
@@ -2071,7 +1974,7 @@ class MainWindow(QMainWindow):
         
         # Header buttons
         header_layout = QHBoxLayout()
-        add_video_btn = QPushButton("📁 Thêm Video")
+        add_video_btn = QPushButton("Add Video")
         add_video_btn.clicked.connect(self.add_video_to_merge)
         add_video_btn.setStyleSheet("""
             QPushButton {
@@ -2087,7 +1990,7 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        clear_btn = QPushButton("🗑️ Xóa tất cả")
+        clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self.clear_merge_list)
         clear_btn.setStyleSheet("""
             QPushButton {
@@ -2112,7 +2015,7 @@ class MainWindow(QMainWindow):
         # Video table với styling giống tab 1
         self.video_table = QTableWidget()
         self.video_table.setColumnCount(3)
-        self.video_table.setHorizontalHeaderLabels(["STT", "FILE VIDEO", "ĐƯỜNG DẪN"])
+        self.video_table.setHorizontalHeaderLabels(["STT", "FILE VIDEO", "URL"])
         
         # Styling video table giống tab 1
         self.video_table.setStyleSheet("""
@@ -2203,31 +2106,7 @@ class MainWindow(QMainWindow):
         options_layout.addRow("Tên file output:", self.output_name_edit)
         
         # Transition removed - always no transitions for clean merging
-        
-        # Audio toggle - improved labeling
-        self.mute_audio_check = QCheckBox("Tắt âm thanh (chỉ giữ video)")
-        self.mute_audio_check.setStyleSheet("""
-            QCheckBox {
-                font-size: 12px;
-                color: #333;
-                padding: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #FF9800;
-                border: 2px solid #FF9800;
-                border-radius: 3px;
-            }
-            QCheckBox::indicator:unchecked {
-                background-color: white;
-                border: 2px solid #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
-        options_layout.addRow("Âm thanh:", self.mute_audio_check)
+        # Audio toggle removed - always keep audio for video merging
         
         options_group.setLayout(options_layout)
         left_layout.addWidget(options_group)
@@ -2398,7 +2277,7 @@ class MainWindow(QMainWindow):
         for i, account in enumerate(self.accounts):
             # Tên tài khoản
             name_item = QTableWidgetItem(account.get("name", ""))
-            name_item.setFont(QFont("Roboto", 9, QFont.Bold))
+            name_item.setFont(QFont("Open Sans", 9, QFont.Bold))
             name_item.setTextAlignment(Qt.AlignCenter)
             self.account_table.setItem(i, 0, name_item)
             
@@ -2433,7 +2312,7 @@ class MainWindow(QMainWindow):
                 pass
                 
             email_item = QTableWidgetItem(email)
-            email_item.setFont(QFont("Roboto", 10))
+            email_item.setFont(QFont("Open Sans", 10))
             email_item.setTextAlignment(Qt.AlignCenter)
             if email != "Unknown":
                 email_item.setForeground(Qt.darkBlue)
@@ -2452,7 +2331,7 @@ class MainWindow(QMainWindow):
                 status_color = Qt.darkGray
                 
             status_item = QTableWidgetItem(status_display)
-            status_item.setFont(QFont("Roboto", 10))
+            status_item.setFont(QFont("Open Sans", 10))
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setForeground(status_color)
             self.account_table.setItem(i, 2, status_item)
@@ -2460,7 +2339,7 @@ class MainWindow(QMainWindow):
             # Thời gian expires
             expires_text = account.get("expires", "Unknown")
             expires_item = QTableWidgetItem(expires_text)
-            expires_item.setFont(QFont("Roboto", 10))
+            expires_item.setFont(QFont("Open Sans", 10))
             expires_item.setTextAlignment(Qt.AlignCenter)
             
             # Kiểm tra cookie có hết hạn không để đổi màu
@@ -2476,7 +2355,7 @@ class MainWindow(QMainWindow):
                     if expires_time <= current_time:
                         # Cookie đã hết hạn - màu đỏ
                         expires_item.setForeground(Qt.red)
-                        expires_item.setFont(QFont("Roboto", 10, QFont.Bold))
+                        expires_item.setFont(QFont("Open Sans", 10, QFont.Bold))
                     else:
                         # Cookie còn hiệu lực - màu xanh
                         expires_item.setForeground(Qt.darkGreen)
@@ -2500,7 +2379,7 @@ class MainWindow(QMainWindow):
                 proxy_display = "None"
                 
             proxy_item = QTableWidgetItem(proxy_display)
-            proxy_item.setFont(QFont("Roboto", 9))
+            proxy_item.setFont(QFont("Open Sans", 9))
             proxy_item.setTextAlignment(Qt.AlignCenter)
             if proxy_text:
                 proxy_item.setForeground(Qt.darkBlue)
@@ -2516,13 +2395,13 @@ class MainWindow(QMainWindow):
             action_layout.setSpacing(4)
             
             # Nút Checker
-            checker_btn = QPushButton("🔍 Checker")
+            checker_btn = QPushButton("Checker")
             checker_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #2196F3;
                     color: white;
                     border: none;
-                    padding: 4px 8px;
+                    padding: 6px 8px;
                     border-radius: 3px;
                     font-weight: bold;
                     font-size: 9px;
@@ -2537,13 +2416,13 @@ class MainWindow(QMainWindow):
             checker_btn.clicked.connect(lambda checked, row=i: self.check_cookie_expiry(row))
             
             # Nút xóa
-            delete_btn = QPushButton("🗑️ Xóa")
+            delete_btn = QPushButton("Delete")
             delete_btn.setStyleSheet("""
                 QPushButton {
                     background-color: #f44336;
                     color: white;
                     border: none;
-                    padding: 4px 8px;
+                    padding: 6px 8px;
                     border-radius: 3px;
                     font-weight: bold;
                     font-size: 9px;
@@ -2817,14 +2696,14 @@ class MainWindow(QMainWindow):
             for i, (stt, prompt, image_path) in enumerate(prompts):
                 # STT
                 stt_item = QTableWidgetItem(str(stt))
-                stt_item.setFont(QFont("Roboto", 9))
+                stt_item.setFont(QFont("Open Sans", 9))
                 stt_item.setTextAlignment(Qt.AlignCenter)
                 stt_item.setForeground(Qt.darkBlue)
                 self.excel_table.setItem(i, 0, stt_item)
                 
                 # PROMPT
                 prompt_item = QTableWidgetItem(prompt)
-                prompt_item.setFont(QFont("Roboto", 9))
+                prompt_item.setFont(QFont("Open Sans", 9))
                 prompt_item.setTextAlignment(Qt.AlignLeft)
                 self.excel_table.setItem(i, 1, prompt_item)
                 
@@ -2837,7 +2716,7 @@ class MainWindow(QMainWindow):
                         image_display = "❌ Not found"
                         
                 image_item = QTableWidgetItem(image_display)
-                image_item.setFont(QFont("Roboto", 9))
+                image_item.setFont(QFont("Open Sans", 9))
                 image_item.setTextAlignment(Qt.AlignCenter)
                 
                 if image_display == "None":
@@ -3131,37 +3010,50 @@ class MainWindow(QMainWindow):
                 
     def add_video_to_merge(self):
         """Thêm video vào danh sách ghép"""
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self, "Chọn video để ghép", "", "Video files (*.mp4 *.avi *.mov *.mkv)"
-        )
-        
-        for file_path in file_paths:
-            row = self.video_table.rowCount()
-            self.video_table.insertRow(row)
+        try:
+            file_paths, _ = QFileDialog.getOpenFileNames(
+                self, "Chọn video để ghép", "", "Video files (*.mp4 *.avi *.mov *.mkv)"
+            )
             
-            # Thứ tự
-            order_item = QTableWidgetItem(str(row + 1))
-            order_item.setFont(QFont("Roboto", 8, QFont.Bold))
-            order_item.setForeground(Qt.darkBlue)
-            order_item.setTextAlignment(Qt.AlignCenter)
-            self.video_table.setItem(row, 0, order_item)
+            # Kiểm tra nếu người dùng đóng dialog mà không chọn file
+            if not file_paths:
+                return
             
-            # Tên file
-            filename_item = QTableWidgetItem(os.path.basename(file_path))
-            filename_item.setFont(QFont("Roboto", 8))
-            filename_item.setForeground(Qt.darkGreen)
-            filename_item.setTextAlignment(Qt.AlignCenter)
-            self.video_table.setItem(row, 1, filename_item)
+            for file_path in file_paths:
+                # Kiểm tra file có tồn tại không
+                if not os.path.exists(file_path):
+                    create_styled_messagebox(self, "Lỗi", f"File không tồn tại: {file_path}", QMessageBox.Warning).exec_()
+                    continue
+                
+                row = self.video_table.rowCount()
+                self.video_table.insertRow(row)
+                
+                # Thứ tự
+                order_item = QTableWidgetItem(str(row + 1))
+                order_item.setFont(QFont("Open Sans", 8, QFont.Bold))
+                order_item.setForeground(Qt.darkBlue)
+                order_item.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row, 0, order_item)
+                
+                # Tên file
+                filename_item = QTableWidgetItem(os.path.basename(file_path))
+                filename_item.setFont(QFont("Open Sans", 8))
+                filename_item.setForeground(Qt.darkGreen)
+                filename_item.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row, 1, filename_item)
+                
+                # Đường dẫn
+                path_item = QTableWidgetItem(file_path)
+                path_item.setFont(QFont("Open Sans", 8))
+                path_item.setForeground(Qt.darkGray)
+                path_item.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row, 2, path_item)
             
-            # Đường dẫn
-            path_item = QTableWidgetItem(file_path)
-            path_item.setFont(QFont("Roboto", 8))
-            path_item.setForeground(Qt.darkGray)
-            path_item.setTextAlignment(Qt.AlignCenter)
-            self.video_table.setItem(row, 2, path_item)
+            # Auto resize columns
+            self.video_table.resizeColumnsToContents()
             
-        # Auto resize columns
-        self.video_table.resizeColumnsToContents()
+        except Exception as e:
+            create_styled_messagebox(self, "Lỗi", f"Lỗi khi thêm video: {str(e)}", QMessageBox.Critical).exec_()
             
     def clear_merge_list(self):
         """Xóa tất cả video trong danh sách"""
@@ -3191,8 +3083,8 @@ class MainWindow(QMainWindow):
             
         output_path = os.path.join(os.path.dirname(video_paths[0]), output_name)
         
-        # Get audio setting
-        mute_audio = self.mute_audio_check.isChecked()
+        # Always keep audio - no toggle needed
+        mute_audio = False
         
         # Disable merge button và clear log
         self.merge_btn.setEnabled(False)
@@ -3200,7 +3092,7 @@ class MainWindow(QMainWindow):
         self.merge_log_text.clear()
         
         # Start merge thread
-        self.merge_thread = VideoMergeThread(video_paths, output_path, mute_audio)
+        self.merge_thread = VideoMergeThread(video_paths, output_path)
         self.merge_thread.progress_updated.connect(self.on_merge_progress_updated)
         self.merge_thread.log_updated.connect(self.on_merge_log_updated)
         self.merge_thread.finished.connect(self.on_merge_finished)
