@@ -5,11 +5,15 @@ import threading
 import re
 import uuid
 import random
+import urllib3
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import pandas as pd
+
+# Tắt warnings về SSL certificate
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 API_URL = "http://62.171.131.164:5000"
@@ -20,24 +24,38 @@ CHECK_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGe
 SESSION_URL = "https://labs.google/fx/api/auth/session"
 UPLOAD_IMAGE_URL = "https://aisandbox-pa.googleapis.com/v1:uploadUserImage"
 
-# User-Agent giả lập trình duyệt thật
+# User-Agent giả lập trình duyệt thật - cập nhật với các version mới hơn
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/135.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/134.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/134.0.0.0 Safari/537.36"
 ]
 
-# Headers giả lập trình duyệt thật
+# Headers giả lập trình duyệt thật - đầy đủ như browser thật
 BROWSER_HEADERS = {
-	"Accept": "application/json, text/plain, */*",
-	"Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-	"Accept-Encoding": "gzip, deflate, br",
+	"Accept": "*/*",
+	"Accept-Encoding": "gzip, deflate, br, zstd",
+	"Accept-Language": "vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5",
 	"Cache-Control": "no-cache",
 	"Pragma": "no-cache",
-	"Connection": "keep-alive"
+	"Connection": "keep-alive",
+	"Origin": "https://labs.google",
+	"Referer": "https://labs.google/",
+	"DNT": "1",
+	"Priority": "u=1, i",
+	"Sec-CH-UA": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+	"Sec-CH-UA-Mobile": "?0",
+	"Sec-CH-UA-Platform": '"Windows"',
+	"Sec-Fetch-Dest": "empty",
+	"Sec-Fetch-Mode": "cors",
+	"Sec-Fetch-Site": "cross-site"
 }
 
 
@@ -50,6 +68,44 @@ def get_random_user_agent() -> str:
 	return random.choice(USER_AGENTS)
 
 
+def randomize_headers(headers: Dict[str, str]) -> Dict[str, str]:
+	"""Randomize headers để tránh pattern detection"""
+	# Randomize Accept-Language
+	languages = [
+		"vi-VN,vi;q=0.9,fr-FR;q=0.8,fr;q=0.7,en-US;q=0.6,en;q=0.5",
+		"en-US,en;q=0.9,vi;q=0.8,fr;q=0.7",
+		"fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7,vi;q=0.6",
+		"en-US,en;q=0.9",
+		"vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+	]
+	headers["Accept-Language"] = random.choice(languages)
+	
+	# Randomize Sec-CH-UA based on User-Agent
+	user_agent = headers.get("User-Agent", "")
+	if "Chrome" in user_agent:
+		chrome_versions = ["135", "134", "133", "132", "131"]
+		version = random.choice(chrome_versions)
+		headers["Sec-CH-UA"] = f'"Google Chrome";v="{version}", "Not-A.Brand";v="8", "Chromium";v="{version}"'
+	elif "Firefox" in user_agent:
+		headers["Sec-CH-UA"] = '"Mozilla";v="109", "Not-A.Brand";v="8"'
+	elif "Safari" in user_agent:
+		headers["Sec-CH-UA"] = '"Safari";v="17", "Not-A.Brand";v="8"'
+	elif "Edge" in user_agent:
+		edge_versions = ["135", "134", "133", "132", "131"]
+		version = random.choice(edge_versions)
+		headers["Sec-CH-UA"] = f'"Microsoft Edge";v="{version}", "Not-A.Brand";v="8", "Chromium";v="{version}"'
+	
+	# Randomize platform
+	platforms = ['"Windows"', '"macOS"', '"Linux"']
+	headers["Sec-CH-UA-Platform"] = random.choice(platforms)
+	
+	# Randomize priority
+	priorities = ["u=1, i", "u=0, i", "u=0,9", "u=1,9"]
+	headers["Priority"] = random.choice(priorities)
+	
+	return headers
+
+
 def get_browser_headers() -> Dict[str, str]:
 	"""Tạo headers giả lập trình duyệt thật"""
 	headers = BROWSER_HEADERS.copy()
@@ -58,20 +114,24 @@ def get_browser_headers() -> Dict[str, str]:
 
 
 def get_api_headers(token: str) -> Dict[str, str]:
-	"""Tạo headers cho API requests với token"""
+	"""Tạo headers cho API requests với token - giống browser thật"""
 	header_token = token.strip()
 	if header_token.lower().startswith("bearer "):
 		header_token = header_token.split(" ", 1)[1]
 	
-	# Headers cơ bản cho API - loại bỏ Origin để tránh xung đột
-	headers = {
-		"Content-Type": "application/json",
+	# Lấy headers cơ bản từ browser headers
+	headers = BROWSER_HEADERS.copy()
+	
+	# Cập nhật các headers đặc biệt cho API
+	headers.update({
+		"Content-Type": "text/plain;charset=UTF-8",  # Giống như request thật
 		"Authorization": f"Bearer {header_token}",
 		"User-Agent": get_random_user_agent(),
-		"Accept": "application/json",
-		"Accept-Language": "en-US,en;q=0.9",
-		"Accept-Encoding": "gzip, deflate, br"
-	}
+		"Accept": "*/*",  # Giống như request thật
+	})
+	
+	# Randomize headers để tránh pattern detection
+	headers = randomize_headers(headers)
 	
 	return headers
 
@@ -79,7 +139,7 @@ def get_api_headers(token: str) -> Dict[str, str]:
 def get_session_config() -> Dict[str, Any]:
 	"""Tạo cấu hình session giả lập"""
 	return {
-		"verify": True,
+		"verify": False,  # Tắt SSL verification để tránh lỗi certificate
 		"allow_redirects": True,
 		"timeout": (60, 300)  # (connect timeout, read timeout) - tăng timeout lên 5 phút cho video generation
 	}
@@ -88,6 +148,50 @@ def get_session_config() -> Dict[str, Any]:
 def add_random_delay(min_delay: float = 0.1, max_delay: float = 0.5) -> None:
 	"""Thêm delay ngẫu nhiên để giả lập hành vi người dùng thật"""
 	time.sleep(random.uniform(min_delay, max_delay))
+
+
+def add_human_like_delay() -> None:
+	"""Thêm delay giống người dùng thật - có thể nghỉ lâu hơn"""
+	# 70% khả năng delay ngắn, 30% khả năng delay dài
+	if random.random() < 0.7:
+		# Delay ngắn: 0.5-2 giây
+		time.sleep(random.uniform(0.5, 2.0))
+	else:
+		# Delay dài: 3-8 giây (giống người dùng nghỉ)
+		time.sleep(random.uniform(3.0, 8.0))
+
+
+def create_browser_like_session() -> requests.Session:
+	"""Tạo session giống browser thật với các cài đặt bổ sung"""
+	session = requests.Session()
+	
+	# Cài đặt adapter với keep-alive
+	adapter = requests.adapters.HTTPAdapter(
+		pool_connections=1,
+		pool_maxsize=1,
+		max_retries=0,  # Tắt retry tự động của requests
+		pool_block=False
+	)
+	session.mount('http://', adapter)
+	session.mount('https://', adapter)
+	
+	# Cài đặt timeout mặc định
+	session.timeout = (30, 60)
+	
+	return session
+
+
+def test_request_headers(token: str) -> None:
+	"""Test function để kiểm tra headers được tạo"""
+	print("🔍 Testing request headers...")
+	headers = get_api_headers(token)
+	
+	print("📋 Headers được tạo:")
+	for key, value in headers.items():
+		print(f"  {key}: {value}")
+	
+	print(f"\n📊 Tổng số headers: {len(headers)}")
+	print("✅ Headers test completed!")
 
 
 def auto_retry_with_backoff(func, *args, max_retries: int = 3, base_delay: float = 1.0, 
@@ -142,8 +246,8 @@ def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optiona
 	headers = get_api_headers(token)
 	session_config = get_session_config()
 	
-	# Tạo session với cấu hình giả lập
-	session = requests.Session()
+	# Tạo session giống browser thật
+	session = create_browser_like_session()
 	session.headers.update(headers)
 	
 	for attempt in range(max_retries):
@@ -151,9 +255,9 @@ def http_post_json(url: str, payload: Dict[str, Any], token: str, proxy: Optiona
 			# Thêm delay ngẫu nhiên để giả lập hành vi người dùng thật
 			if attempt > 0:
 				# Delay lâu hơn khi retry
-				add_random_delay(1.0, 3.0)
+				add_human_like_delay()
 			else:
-				add_random_delay(0.1, 0.5)
+				add_random_delay(0.5, 1.5)  # Delay ngắn hơn cho lần đầu
 			
 			# Thử với proxy trước, nếu lỗi thì thử không proxy
 			current_proxy = proxy

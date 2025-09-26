@@ -3,6 +3,7 @@ import os
 import json
 import re
 import time
+import urllib3
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, 
@@ -16,6 +17,23 @@ from PyQt5.QtGui import QFont
 import pandas as pd
 import requests
 from api import *
+
+# Tắt warnings về SSL certificate
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Import các thư viện ghép video thay thế
+try:
+    from moviepy.editor import VideoFileClip, concatenate_videoclips
+    MOVIEPY_AVAILABLE = True
+except ImportError:
+    MOVIEPY_AVAILABLE = False
+
+try:
+    import cv2
+    import numpy as np
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
 
 def create_styled_messagebox(parent, title, message, icon=QMessageBox.Information):
     """Tạo QMessageBox với styling đơn giản"""
@@ -291,58 +309,147 @@ class VideoMergeThread(QThread):
             self.log_updated.emit("✅ Tất cả video files hợp lệ")
             self.progress_updated.emit(30, "Đang ghép video...")
             
-            # Sử dụng phương pháp concat đơn giản nhất - video-only để tránh lỗi audio
-            cmd = ["ffmpeg", "-y"]  # -y để overwrite output file
+            # Sử dụng MoviePy để ghép video (phương pháp chính)
+            success = self._merge_with_moviepy()
             
-            # Add input files
-            for video_path in self.video_paths:
-                cmd.extend(["-i", video_path])
+            if not success:
+                # Fallback: Sử dụng OpenCV nếu MoviePy thất bại
+                self.log_updated.emit("🔄 Thử phương pháp OpenCV...")
+                success = self._merge_with_opencv()
             
-            # Concat filter đơn giản - chỉ video để tránh lỗi audio
-            filter_parts = []
-            for i in range(len(self.video_paths)):
-                filter_parts.append(f"[{i}:v]")
+            if not success:
+                self.log_updated.emit("❌ Không thể ghép video!")
+                self.finished.emit(False, "Không thể ghép video! Vui lòng cài đặt MoviePy: pip install moviepy")
+                return
             
-            video_filter = f"{''.join(filter_parts)}concat=n={len(self.video_paths)}:v=1:a=0[outv]"
-            cmd.extend(["-filter_complex", video_filter])
-            cmd.extend(["-map", "[outv]"])
-            
-            # Output settings đơn giản
-            cmd.extend(["-c:v", "libx264", "-preset", "ultrafast"])  # ultrafast để nhanh và ít lỗi
-            cmd.append(self.output_path)
-            
-            self.log_updated.emit("📝 Đang chạy FFmpeg (video-only)...")
-            self.progress_updated.emit(60, "Đang ghép video...")
-            
-            # Execute FFmpeg
-            import subprocess
-            import platform
-            
-            # Ẩn cửa sổ CMD trên Windows
-            startupinfo = None
-            if platform.system() == "Windows":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo)
-            
-            if result.returncode == 0:
-                self.progress_updated.emit(100, "Hoàn thành!")
-                self.log_updated.emit("✅ Ghép video thành công!")
-                self.finished.emit(True, f"Đã ghép video thành công!\nFile: {self.output_path}")
-            else:
-                error_msg = result.stderr if result.stderr else "Lỗi không xác định từ FFmpeg"
-                self.log_updated.emit(f"❌ Lỗi ghép video: {error_msg[:200]}...")
-                self.finished.emit(False, f"Lỗi ghép video:\n{error_msg}")
                 
-        except FileNotFoundError:
-            self.log_updated.emit("❌ Không tìm thấy FFmpeg!")
-            self.finished.emit(False, "Không tìm thấy FFmpeg! Vui lòng cài đặt FFmpeg.")
         except Exception as e:
             error_msg = str(e) if e else "Lỗi không xác định"
             self.log_updated.emit(f"❌ Lỗi: {error_msg}")
             self.finished.emit(False, f"Lỗi: {error_msg}")
+    
+    def _merge_with_moviepy(self):
+        """Ghép video sử dụng MoviePy"""
+        if not MOVIEPY_AVAILABLE:
+            self.log_updated.emit("⚠️ MoviePy không có sẵn, bỏ qua...")
+            return False
+        
+        try:
+            self.log_updated.emit("🎬 Sử dụng MoviePy để ghép video...")
+            
+            # Load các video clips
+            clips = []
+            for i, video_path in enumerate(self.video_paths):
+                self.log_updated.emit(f"📹 Đang load video {i+1}/{len(self.video_paths)}...")
+                try:
+                    clip = VideoFileClip(video_path)
+                    if clip is None:
+                        self.log_updated.emit(f"⚠️ Không thể load video {i+1}: {video_path}")
+                        continue
+                    clips.append(clip)
+                except Exception as e:
+                    self.log_updated.emit(f"⚠️ Lỗi load video {i+1}: {str(e)}")
+                    continue
+            
+            if not clips:
+                self.log_updated.emit("❌ Không có video nào có thể load!")
+                return False
+            
+            self.log_updated.emit(f"✅ Đã load {len(clips)}/{len(self.video_paths)} video")
+            
+            # Ghép video
+            self.log_updated.emit("🔗 Đang ghép video...")
+            self.progress_updated.emit(50, "Đang ghép video...")
+            
+            if len(clips) == 1:
+                final_clip = clips[0]
+            else:
+                final_clip = concatenate_videoclips(clips)
+            
+            if final_clip is None:
+                self.log_updated.emit("❌ Không thể ghép video!")
+                return False
+            
+            # Xuất video
+            self.log_updated.emit("💾 Đang xuất video...")
+            self.progress_updated.emit(70, "Đang xuất video...")
+            
+            # Tạo thư mục output nếu chưa có
+            output_dir = os.path.dirname(self.output_path)
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            final_clip.write_videofile(self.output_path, 
+                                     codec='libx264', 
+                                     audio_codec='aac',
+                                     temp_audiofile='temp-audio.m4a',
+                                     remove_temp=True,
+                                     verbose=False,
+                                     logger=None)
+            
+            # Cleanup
+            final_clip.close()
+            for clip in clips:
+                clip.close()
+            
+            self.progress_updated.emit(100, "Hoàn thành!")
+            self.log_updated.emit("✅ Ghép video thành công với MoviePy!")
+            return True
+            
+        except Exception as e:
+            self.log_updated.emit(f"❌ Lỗi MoviePy: {str(e)}")
+            # Cleanup nếu có lỗi
+            try:
+                for clip in clips:
+                    clip.close()
+            except:
+                pass
+            return False
+    
+    def _merge_with_opencv(self):
+        """Ghép video sử dụng OpenCV"""
+        if not OPENCV_AVAILABLE:
+            self.log_updated.emit("⚠️ OpenCV không có sẵn, bỏ qua...")
+            return False
+        
+        try:
+            self.log_updated.emit("🎥 Sử dụng OpenCV để ghép video...")
+            
+            # Lấy thông tin video đầu tiên
+            cap = cv2.VideoCapture(self.video_paths[0])
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            
+            # Tạo video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(self.output_path, fourcc, fps, (width, height))
+            
+            # Ghép từng video
+            for i, video_path in enumerate(self.video_paths):
+                self.log_updated.emit(f"📹 Đang xử lý video {i+1}/{len(self.video_paths)}...")
+                # Cập nhật progress dựa trên số video đã xử lý
+                progress = 30 + (i + 1) * 60 // len(self.video_paths)
+                self.progress_updated.emit(progress, f"Đang xử lý video {i+1}/{len(self.video_paths)}...")
+                
+                cap = cv2.VideoCapture(video_path)
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    out.write(frame)
+                cap.release()
+            
+            out.release()
+            self.progress_updated.emit(100, "Hoàn thành!")
+            self.log_updated.emit("✅ Ghép video thành công với OpenCV!")
+            return True
+            
+        except Exception as e:
+            self.log_updated.emit(f"❌ Lỗi OpenCV: {str(e)}")
+            return False
+    
 
 class TestCookieThread(QThread):
     """Thread để test cookie không block UI"""
@@ -361,8 +468,9 @@ class TestCookieThread(QThread):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
             
+            # Tạm thời tắt SSL verification để tránh lỗi certificate
             response = requests.get("https://labs.google/fx/api/auth/session", 
-                                  headers=headers, timeout=10)
+                                  headers=headers, timeout=10, verify=False)
             
             if response.status_code == 200:
                 data = response.json()
@@ -422,9 +530,10 @@ class TestProxyThread(QThread):
                 'https': self.proxy_str
             }
             
+            # Tạm thời tắt SSL verification để tránh lỗi certificate
             response = requests.get("https://httpbin.org/ip", 
                                   proxies=proxies, 
-                                  timeout=10)
+                                  timeout=10, verify=False)
             
             if response.status_code == 200:
                 data = response.json()
@@ -458,8 +567,9 @@ class CheckCookieThread(QThread):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             }
             
+            # Tạm thời tắt SSL verification để tránh lỗi certificate
             response = requests.get("https://labs.google/fx/api/auth/session", 
-                                  headers=headers, timeout=10)
+                                  headers=headers, timeout=10, verify=False)
             
             if response.status_code == 200:
                 data = response.json()
@@ -1456,6 +1566,9 @@ class MainWindow(QMainWindow):
         # Tab 3: Ghép video
         self.create_merge_tab()
         
+        # Tab 4: Lấy đường dẫn ảnh
+        self.create_image_path_tab()
+        
     def create_account_tab(self):
         """Tab 1: Quản lý tài khoản"""
         tab = QWidget()
@@ -1653,9 +1766,9 @@ class MainWindow(QMainWindow):
         config_layout.addRow("Seed:", self.seed_spin)
         
         self.max_workers_spin = QSpinBox()
-        self.max_workers_spin.setRange(1, 5)
+        self.max_workers_spin.setRange(1, 3)
         self.max_workers_spin.setValue(3)
-        self.max_workers_spin.setToolTip("Số luồng xử lý song song (1-5)")
+        self.max_workers_spin.setToolTip("Số luồng xử lý song song (1-3)")
         config_layout.addRow("Threads:", self.max_workers_spin)
         
         # Aspect Ratio selection
@@ -2229,6 +2342,345 @@ class MainWindow(QMainWindow):
         
         tab.setLayout(main_layout)
         self.tab_widget.addTab(tab, "Ghép Video")
+        
+    def create_image_path_tab(self):
+        """Tab 4: Lấy đường dẫn ảnh"""
+        tab = QWidget()
+        layout = QVBoxLayout()
+        
+        # Main layout với tỷ lệ cân đối
+        main_layout = QHBoxLayout()
+        
+        # Left panel - Cấu hình (35%)
+        left_panel = QWidget()
+        left_panel.setMaximumWidth(400)
+        left_layout = QVBoxLayout()
+        left_layout.setSpacing(5)
+        
+        # Group: Chọn Folder
+        folder_group = QGroupBox("Chọn Folder Media")
+        folder_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                margin-top: 5px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+        """)
+        folder_layout = QVBoxLayout()
+        folder_layout.setSpacing(8)
+        
+        # Folder selection
+        folder_selection_layout = QHBoxLayout()
+        folder_selection_layout.setSpacing(5)
+        self.folder_path_edit = QLineEdit()
+        self.folder_path_edit.setPlaceholderText("Chọn folder chứa media...")
+        self.folder_path_edit.setReadOnly(True)
+        self.folder_path_edit.setStyleSheet("""
+            QLineEdit {
+                padding: 6px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: #f9f9f9;
+                font-size: 11px;
+            }
+        """)
+        
+        browse_btn = QPushButton("📁 Chọn")
+        browse_btn.clicked.connect(self.browse_image_folder)
+        browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 11px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        
+        folder_selection_layout.addWidget(self.folder_path_edit)
+        folder_selection_layout.addWidget(browse_btn)
+        folder_layout.addLayout(folder_selection_layout)
+        
+        # Regex pattern input
+        regex_layout = QHBoxLayout()
+        regex_layout.setSpacing(5)
+        regex_label = QLabel("Regex:")
+        regex_label.setStyleSheet("font-weight: bold; font-size: 11px; min-width: 50px;")
+        self.regex_pattern_edit = QLineEdit()
+        self.regex_pattern_edit.setPlaceholderText("(\\d+).*\\.(jpg|jpeg|png|gif|bmp|mp4|avi|mov|mkv|wmv|flv|webm)$")
+        self.regex_pattern_edit.setText(r"(\d+).*\.(jpg|jpeg|png|gif|bmp|mp4|avi|mov|mkv|wmv|flv|webm)$")
+        self.regex_pattern_edit.setStyleSheet("""
+            QLineEdit {
+                padding: 6px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 11px;
+                font-family: 'Courier New', monospace;
+            }
+        """)
+        
+        regex_layout.addWidget(regex_label)
+        regex_layout.addWidget(self.regex_pattern_edit)
+        folder_layout.addLayout(regex_layout)
+        
+        # Scan button
+        scan_btn = QPushButton("🔍 Quét Media")
+        scan_btn.clicked.connect(self.scan_images)
+        scan_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        folder_layout.addWidget(scan_btn)
+        
+        folder_group.setLayout(folder_layout)
+        left_layout.addWidget(folder_group)
+        
+        # Group: Tùy chọn xuất
+        export_group = QGroupBox("Tùy chọn Xuất")
+        export_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                margin-top: 5px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+        """)
+        export_layout = QVBoxLayout()
+        export_layout.setSpacing(8)
+        
+        # Export format selection
+        format_layout = QHBoxLayout()
+        format_layout.setSpacing(5)
+        format_label = QLabel("Định dạng:")
+        format_label.setStyleSheet("font-weight: bold; font-size: 11px; min-width: 60px;")
+        self.export_format_combo = QComboBox()
+        self.export_format_combo.addItems(["Danh sách đường dẫn", "JSON", "CSV", "TXT"])
+        self.export_format_combo.currentTextChanged.connect(self.update_preview)
+        self.export_format_combo.setStyleSheet("""
+            QComboBox {
+                padding: 5px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 11px;
+            }
+        """)
+        
+        format_layout.addWidget(format_label)
+        format_layout.addWidget(self.export_format_combo)
+        export_layout.addLayout(format_layout)
+        
+        # Export buttons
+        export_buttons_layout = QHBoxLayout()
+        export_buttons_layout.setSpacing(5)
+        export_btn = QPushButton("💾 Xuất")
+        export_btn.clicked.connect(self.export_image_paths)
+        export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+        """)
+        
+        copy_btn = QPushButton("📋 Copy")
+        copy_btn.clicked.connect(self.copy_image_paths)
+        copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #9C27B0;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #7B1FA2;
+            }
+        """)
+        
+        export_buttons_layout.addWidget(export_btn)
+        export_buttons_layout.addWidget(copy_btn)
+        export_layout.addLayout(export_buttons_layout)
+        
+        export_group.setLayout(export_layout)
+        left_layout.addWidget(export_group)
+        
+        left_panel.setLayout(left_layout)
+        main_layout.addWidget(left_panel)
+        
+        # Right panel - Danh sách ảnh (60%)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout()
+        
+        # Group: Danh sách media
+        image_group = QGroupBox("Danh sách Media")
+        image_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                margin-top: 5px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+        """)
+        image_layout = QVBoxLayout()
+        image_layout.setSpacing(5)
+        
+        # Image table
+        self.image_table = QTableWidget()
+        self.image_table.setColumnCount(5)
+        self.image_table.setHorizontalHeaderLabels(["STT", "Tên File", "Đường dẫn", "Kích thước", "Loại"])
+        
+        # Styling image table
+        self.image_table.setStyleSheet("""
+            QTableWidget {
+                background-color: white;
+                border-radius: 3px;
+                gridline-color: #e0e0e0;
+                selection-background-color: #e3f2fd;
+                alternate-background-color: #f8f9fa;
+            }
+            QTableWidget::item {
+                padding: 6px;
+                border-bottom: 1px solid #f0f0f0;
+                font-size: 10px;
+            }
+            QTableWidget::item:selected {
+                background-color: transparent;
+                color: inherit;
+            }
+            QTableWidget::item:hover {
+                background-color: transparent;
+            }
+            QHeaderView::section {
+                background-color: #f8f9fa;
+                color: #333;
+                padding: 6px;
+                border: none;
+                border-right: 1px solid #e0e0e0;
+                border-bottom: 1px solid #e0e0e0;
+                font-weight: bold;
+                font-size: 11px;
+                text-align: center;
+            }
+            QHeaderView::section:first {
+                border-top-left-radius: 8px;
+            }
+            QHeaderView::section:last {
+                border-top-right-radius: 8px;
+                border-right: none;
+            }
+        """)
+        
+        # Image table properties
+        self.image_table.horizontalHeader().setStretchLastSection(True)
+        self.image_table.setAlternatingRowColors(True)
+        self.image_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.image_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.image_table.verticalHeader().setVisible(False)
+        self.image_table.setShowGrid(True)
+        self.image_table.setSortingEnabled(True)
+        self.image_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        
+        # Set column widths
+        self.image_table.verticalHeader().setDefaultSectionSize(30)
+        self.image_table.setColumnWidth(0, 50)  # STT
+        self.image_table.setColumnWidth(1, 160)  # Tên File
+        self.image_table.setColumnWidth(2, 220)  # Đường dẫn
+        self.image_table.setColumnWidth(3, 70)  # Kích thước
+        self.image_table.setColumnWidth(4, 60)  # Loại
+        
+        image_layout.addWidget(self.image_table, 1)
+        image_group.setLayout(image_layout)
+        right_layout.addWidget(image_group, 1)
+        
+        # Group: Preview
+        preview_group = QGroupBox("Preview")
+        preview_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                margin-top: 5px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+        """)
+        preview_layout = QVBoxLayout()
+        preview_layout.setSpacing(5)
+        
+        self.preview_text = QTextEdit()
+        self.preview_text.setPlaceholderText("Preview kết quả xuất...")
+        self.preview_text.setMaximumHeight(120)
+        self.preview_text.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 6px;
+                font-family: 'Courier New', monospace;
+                font-size: 10px;
+                background-color: #f9f9f9;
+            }
+        """)
+        preview_layout.addWidget(self.preview_text)
+        
+        preview_group.setLayout(preview_layout)
+        right_layout.addWidget(preview_group)
+        
+        right_panel.setLayout(right_layout)
+        main_layout.addWidget(right_panel)
+        
+        tab.setLayout(main_layout)
+        self.tab_widget.addTab(tab, "Lấy Đường dẫn Ảnh")
+        
+        # Initialize image list
+        self.image_paths = []
         
         
     def add_cookie(self):
@@ -3117,6 +3569,264 @@ class MainWindow(QMainWindow):
             create_styled_messagebox(self, "Thành công", message).exec_()
         else:
             create_styled_messagebox(self, "Lỗi", message, QMessageBox.Critical).exec_()
+
+    def browse_image_folder(self):
+        """Chọn folder chứa ảnh"""
+        folder_path = QFileDialog.getExistingDirectory(self, "Chọn folder chứa ảnh")
+        if folder_path:
+            self.folder_path_edit.setText(folder_path)
+            # Auto scan when folder is selected
+            self.scan_images()
+    
+    def scan_images(self):
+        """Quét media files trong folder theo regex pattern"""
+        folder_path = self.folder_path_edit.text()
+        if not folder_path or not os.path.exists(folder_path):
+            create_styled_messagebox(self, "Lỗi", "Vui lòng chọn folder hợp lệ!").exec_()
+            return
+        
+        regex_pattern = self.regex_pattern_edit.text().strip()
+        if not regex_pattern:
+            create_styled_messagebox(self, "Lỗi", "Vui lòng nhập regex pattern!").exec_()
+            return
+        
+        try:
+            # Compile regex pattern
+            pattern = re.compile(regex_pattern, re.IGNORECASE)
+            
+            # Scan for media files
+            media_files = []
+            supported_extensions = (
+                # Images
+                '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.svg', '.ico',
+                # Videos
+                '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpg', '.mpeg',
+                # Audio
+                '.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a',
+                # Documents
+                '.pdf', '.doc', '.docx', '.txt', '.rtf', '.odt',
+                # Archives
+                '.zip', '.rar', '.7z', '.tar', '.gz'
+            )
+            
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    if file.lower().endswith(supported_extensions):
+                        full_path = os.path.join(root, file)
+                        match = pattern.search(file)
+                        if match:
+                            # Extract number from first group
+                            try:
+                                number = int(match.group(1))
+                                media_files.append((number, file, full_path))
+                            except (ValueError, IndexError):
+                                # If no number found, use 0
+                                media_files.append((0, file, full_path))
+            
+            # Sort by number
+            media_files.sort(key=lambda x: x[0])
+            
+            # Update image_paths list
+            self.image_paths = [item[2] for item in media_files]
+            
+            # Update table
+            self.update_image_table(media_files)
+            
+            # Update preview
+            self.update_preview()
+            
+            create_styled_messagebox(self, "Thành công", f"Tìm thấy {len(media_files)} file phù hợp!").exec_()
+            
+        except re.error as e:
+            create_styled_messagebox(self, "Lỗi", f"Regex pattern không hợp lệ: {str(e)}").exec_()
+        except Exception as e:
+            create_styled_messagebox(self, "Lỗi", f"Lỗi khi quét file: {str(e)}").exec_()
+    
+    def update_image_table(self, media_files):
+        """Cập nhật bảng danh sách media"""
+        self.image_table.setRowCount(len(media_files))
+        
+        for i, (number, filename, full_path) in enumerate(media_files):
+            # STT
+            self.image_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            
+            # Tên file
+            self.image_table.setItem(i, 1, QTableWidgetItem(filename))
+            
+            # Đường dẫn
+            self.image_table.setItem(i, 2, QTableWidgetItem(full_path))
+            
+            # Kích thước file
+            try:
+                size_bytes = os.path.getsize(full_path)
+                if size_bytes < 1024:
+                    size_str = f"{size_bytes} B"
+                elif size_bytes < 1024 * 1024:
+                    size_str = f"{size_bytes / 1024:.1f} KB"
+                elif size_bytes < 1024 * 1024 * 1024:
+                    size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+                else:
+                    size_str = f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+                self.image_table.setItem(i, 3, QTableWidgetItem(size_str))
+            except:
+                self.image_table.setItem(i, 3, QTableWidgetItem("N/A"))
+            
+            # Loại file
+            file_ext = os.path.splitext(filename)[1].lower()
+            if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.svg', '.ico']:
+                file_type = "🖼️ Ảnh"
+            elif file_ext in ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpg', '.mpeg']:
+                file_type = "🎥 Video"
+            elif file_ext in ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']:
+                file_type = "🎵 Audio"
+            elif file_ext in ['.pdf', '.doc', '.docx', '.txt', '.rtf', '.odt']:
+                file_type = "📄 Doc"
+            elif file_ext in ['.zip', '.rar', '.7z', '.tar', '.gz']:
+                file_type = "📦 Archive"
+            else:
+                file_type = "📁 File"
+            
+            self.image_table.setItem(i, 4, QTableWidgetItem(file_type))
+    
+    def get_file_type(self, filename):
+        """Lấy loại file từ tên file"""
+        file_ext = os.path.splitext(filename)[1].lower()
+        if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.svg', '.ico']:
+            return "Image"
+        elif file_ext in ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.mpg', '.mpeg']:
+            return "Video"
+        elif file_ext in ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']:
+            return "Audio"
+        elif file_ext in ['.pdf', '.doc', '.docx', '.txt', '.rtf', '.odt']:
+            return "Document"
+        elif file_ext in ['.zip', '.rar', '.7z', '.tar', '.gz']:
+            return "Archive"
+        else:
+            return "File"
+    
+    def update_preview(self):
+        """Cập nhật preview kết quả"""
+        if not self.image_paths:
+            self.preview_text.clear()
+            return
+        
+        format_type = self.export_format_combo.currentText()
+        
+        if format_type == "Danh sách đường dẫn":
+            preview = "\n".join(self.image_paths)
+        elif format_type == "JSON":
+            data = {
+                "media_files": [
+                    {
+                        "index": i + 1,
+                        "filename": os.path.basename(path),
+                        "path": path,
+                        "file_type": self.get_file_type(os.path.basename(path))
+                    }
+                    for i, path in enumerate(self.image_paths)
+                ]
+            }
+            preview = json.dumps(data, indent=2, ensure_ascii=False)
+        elif format_type == "CSV":
+            preview = "Index,Filename,Path,Type\n"
+            for i, path in enumerate(self.image_paths):
+                file_type = self.get_file_type(os.path.basename(path))
+                preview += f"{i + 1},{os.path.basename(path)},{path},{file_type}\n"
+        elif format_type == "TXT":
+            preview = "\n".join([f"{i + 1}. {path}" for i, path in enumerate(self.image_paths)])
+        
+        self.preview_text.setPlainText(preview)
+    
+    def export_image_paths(self):
+        """Xuất danh sách đường dẫn ảnh ra file"""
+        if not self.image_paths:
+            create_styled_messagebox(self, "Lỗi", "Không có ảnh nào để xuất!").exec_()
+            return
+        
+        format_type = self.export_format_combo.currentText()
+        
+        # Get file extension based on format
+        extensions = {
+            "Danh sách đường dẫn": ".txt",
+            "JSON": ".json",
+            "CSV": ".csv",
+            "TXT": ".txt"
+        }
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Lưu file", 
+            f"image_paths{extensions[format_type]}",
+            f"{format_type} files (*{extensions[format_type]})"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    if format_type == "Danh sách đường dẫn":
+                        f.write("\n".join(self.image_paths))
+                    elif format_type == "JSON":
+                        data = {
+                            "media_files": [
+                                {
+                                    "index": i + 1,
+                                    "filename": os.path.basename(path),
+                                    "path": path,
+                                    "file_type": self.get_file_type(os.path.basename(path))
+                                }
+                                for i, path in enumerate(self.image_paths)
+                            ]
+                        }
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    elif format_type == "CSV":
+                        f.write("Index,Filename,Path,Type\n")
+                        for i, path in enumerate(self.image_paths):
+                            file_type = self.get_file_type(os.path.basename(path))
+                            f.write(f"{i + 1},{os.path.basename(path)},{path},{file_type}\n")
+                    elif format_type == "TXT":
+                        f.write("\n".join([f"{i + 1}. {path}" for i, path in enumerate(self.image_paths)]))
+                
+                create_styled_messagebox(self, "Thành công", f"Đã xuất {len(self.image_paths)} file ra file!").exec_()
+                
+            except Exception as e:
+                create_styled_messagebox(self, "Lỗi", f"Lỗi khi xuất file: {str(e)}").exec_()
+    
+    def copy_image_paths(self):
+        """Copy danh sách đường dẫn ảnh vào clipboard"""
+        if not self.image_paths:
+            create_styled_messagebox(self, "Lỗi", "Không có ảnh nào để copy!").exec_()
+            return
+        
+        format_type = self.export_format_combo.currentText()
+        
+        if format_type == "Danh sách đường dẫn":
+            text = "\n".join(self.image_paths)
+        elif format_type == "JSON":
+            data = {
+                "media_files": [
+                    {
+                        "index": i + 1,
+                        "filename": os.path.basename(path),
+                        "path": path,
+                        "file_type": self.get_file_type(os.path.basename(path))
+                    }
+                    for i, path in enumerate(self.image_paths)
+                ]
+            }
+            text = json.dumps(data, indent=2, ensure_ascii=False)
+        elif format_type == "CSV":
+            text = "Index,Filename,Path,Type\n"
+            for i, path in enumerate(self.image_paths):
+                file_type = self.get_file_type(os.path.basename(path))
+                text += f"{i + 1},{os.path.basename(path)},{path},{file_type}\n"
+        elif format_type == "TXT":
+            text = "\n".join([f"{i + 1}. {path}" for i, path in enumerate(self.image_paths)])
+        
+        # Copy to clipboard
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        
+        create_styled_messagebox(self, "Thành công", f"Đã copy {len(self.image_paths)} đường dẫn file!").exec_()
 
 
     
