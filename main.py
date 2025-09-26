@@ -314,12 +314,12 @@ class VideoMergeThread(QThread):
             
             if not success:
                 # Fallback: Sử dụng OpenCV nếu MoviePy thất bại
-                self.log_updated.emit("🔄 Thử phương pháp OpenCV...")
+                self.log_updated.emit("🔄 Thử phương pháp ghép video...")
                 success = self._merge_with_opencv()
             
             if not success:
                 self.log_updated.emit("❌ Không thể ghép video!")
-                self.finished.emit(False, "Không thể ghép video! Vui lòng cài đặt MoviePy: pip install moviepy")
+                self.finished.emit(False, "Không thể ghép video! Vui lòng cài đặt liên hệ hỗ trợ")
                 return
             
                 
@@ -331,11 +331,11 @@ class VideoMergeThread(QThread):
     def _merge_with_moviepy(self):
         """Ghép video sử dụng MoviePy"""
         if not MOVIEPY_AVAILABLE:
-            self.log_updated.emit("⚠️ MoviePy không có sẵn, bỏ qua...")
+            self.log_updated.emit("⚠️ Không thể ghép video, bỏ qua...")
             return False
         
         try:
-            self.log_updated.emit("🎬 Sử dụng MoviePy để ghép video...")
+            self.log_updated.emit("🎬 Đang ghép video...")
             
             # Load các video clips
             clips = []
@@ -393,11 +393,12 @@ class VideoMergeThread(QThread):
                 clip.close()
             
             self.progress_updated.emit(100, "Hoàn thành!")
-            self.log_updated.emit("✅ Ghép video thành công với MoviePy!")
+            self.log_updated.emit("✅ Ghép video thành công!")
+            self.finished.emit(True, f"Đã ghép video thành công!\nFile: {self.output_path}")
             return True
             
         except Exception as e:
-            self.log_updated.emit(f"❌ Lỗi MoviePy: {str(e)}")
+            self.log_updated.emit(f"❌ Lỗi ghép video: {str(e)}")
             # Cleanup nếu có lỗi
             try:
                 for clip in clips:
@@ -409,11 +410,11 @@ class VideoMergeThread(QThread):
     def _merge_with_opencv(self):
         """Ghép video sử dụng OpenCV"""
         if not OPENCV_AVAILABLE:
-            self.log_updated.emit("⚠️ OpenCV không có sẵn, bỏ qua...")
+            self.log_updated.emit("⚠️ Không thể ghép video, bỏ qua...")
             return False
         
         try:
-            self.log_updated.emit("🎥 Sử dụng OpenCV để ghép video...")
+            self.log_updated.emit("🎬 Đang ghép video...")
             
             # Lấy thông tin video đầu tiên
             cap = cv2.VideoCapture(self.video_paths[0])
@@ -443,11 +444,12 @@ class VideoMergeThread(QThread):
             
             out.release()
             self.progress_updated.emit(100, "Hoàn thành!")
-            self.log_updated.emit("✅ Ghép video thành công với OpenCV!")
+            self.log_updated.emit("✅ Ghép video thành công!")
+            self.finished.emit(True, f"Đã ghép video thành công!\nFile: {self.output_path}")
             return True
             
         except Exception as e:
-            self.log_updated.emit(f"❌ Lỗi OpenCV: {str(e)}")
+            self.log_updated.emit(f"❌ Lỗi ghép video: {str(e)}")
             return False
     
 
