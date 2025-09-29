@@ -997,41 +997,85 @@ class VideoProcessingThread(QThread):
             self.executor.shutdown(wait=False)
         
     def distribute_prompts_to_accounts(self):
-        """Chia đều prompts cho các tài khoản để tối ưu hóa"""
+        """Chia prompts cho các tài khoản theo batch tuần tự"""
         if not self.accounts_data or not self.prompts:
             return {}
         
         account_count = len(self.accounts_data)
         prompt_count = len(self.prompts)
+        thread_count = self.max_workers
         
-        # Tối ưu: Sử dụng generator để tiết kiệm memory
-        prompts_per_account = prompt_count // account_count
-        remaining_prompts = prompt_count % account_count
-        
+        # Tạo các batch prompts cho mỗi account
+        # Mỗi account sẽ xử lý prompts theo thứ tự: 1,2,3 → 10,11,12 → 19,20,21...
         distribution = {}
-        start_index = 0
         
         for i, account in enumerate(self.accounts_data):
             account_name = account.get("name", f"Account {i+1}")
             
-            # Tài khoản đầu tiên sẽ nhận thêm các prompts còn lại
-            prompts_for_this_account = prompts_per_account + (1 if i < remaining_prompts else 0)
-            
-            end_index = start_index + prompts_for_this_account
-            # Tối ưu: Chỉ lưu indices thay vì copy toàn bộ data
-            account_prompts = self.prompts[start_index:end_index]
+            # Tạo danh sách prompts cho account này (theo thứ tự tuần tự)
+            account_prompts = []
+            for j in range(i, prompt_count, account_count):
+                account_prompts.append(self.prompts[j])
             
             distribution[account_name] = {
                 'account': account,
+                'threads': thread_count,
                 'prompts': account_prompts,
                 'count': len(account_prompts),
-                'start_idx': start_index,
-                'end_idx': end_index
+                'account_index': i
             }
-            
-            start_index = end_index
         
         return distribution
+    
+    def process_account_prompts(self, account_data, threads_for_account, account_prompts):
+        """Xử lý prompts được gán cho account này theo batch tuần tự"""
+        account_results = []
+        
+        # Chia prompts thành các batch theo số luồng
+        batch_size = threads_for_account
+        total_prompts = len(account_prompts)
+        
+        for batch_start in range(0, total_prompts, batch_size):
+            if self.should_stop:
+                break
+                
+            batch_end = min(batch_start + batch_size, total_prompts)
+            batch_prompts = account_prompts[batch_start:batch_end]
+            
+            # Tạo ThreadPoolExecutor cho batch này
+            batch_executor = ThreadPoolExecutor(max_workers=len(batch_prompts))
+            
+            try:
+                # Tạo tasks cho batch hiện tại
+                future_to_prompt = {}
+                
+                for prompt_data in batch_prompts:
+                    if self.should_stop:
+                        break
+                    future = batch_executor.submit(self.process_video_with_specific_account, prompt_data, account_data)
+                    future_to_prompt[future] = prompt_data
+                
+                # Xử lý kết quả batch hiện tại
+                for future in as_completed(future_to_prompt):
+                    if self.should_stop:
+                        # Cancel các future còn lại
+                        for f in future_to_prompt:
+                            f.cancel()
+                        break
+                        
+                    prompt_data = future_to_prompt[future]
+                    
+                    try:
+                        result = future.result()
+                        account_results.append(result)
+                    except Exception as e:
+                        stt, prompt, image_path = prompt_data
+                        account_results.append((stt, prompt, False, str(e)))
+                        
+            finally:
+                batch_executor.shutdown(wait=False)
+        
+        return account_results
         
     def get_next_account(self):
         """Lấy tài khoản tiếp theo để xoay vòng"""
@@ -1444,69 +1488,61 @@ class VideoProcessingThread(QThread):
         try:
             account_count = len(self.accounts_data)
             
-            
-            # Hiển thị thông tin chia tải
+            # Hiển thị thông tin chia tải theo batch tuần tự
             distribution_info = []
             for account_name, data in self.account_prompts_distribution.items():
-                distribution_info.append(f"{account_name}: {data['count']} prompts")
+                distribution_info.append(f"{account_name}: {data['count']} prompts, {data['threads']} luồng/batch")
             
             distribution_text = " | ".join(distribution_info)
-            self.progress_updated.emit(5, f"🚀 Bắt đầu xử lý {self.total_count} video với {self.max_workers} luồng và {account_count} tài khoản...")
-            self.progress_updated.emit(8, f"📊 Chia tải: {distribution_text}")
+            self.progress_updated.emit(5, f"🚀 Bắt đầu xử lý {self.total_count} video với {self.max_workers} luồng/batch và {account_count} tài khoản (tuần tự)...")
+            self.progress_updated.emit(8, f"📊 Chia batch tuần tự: {distribution_text}")
             
-            # Sử dụng ThreadPoolExecutor để xử lý parallel với chia tải tối ưu
+            # Xử lý song song với mỗi thread sử dụng một account riêng biệt
             results = []
-            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            
+            # Tạo ThreadPoolExecutor với số luồng bằng số account
+            self.executor = ThreadPoolExecutor(max_workers=account_count)
             
             try:
-                # Tạo tasks với account distribution
-                future_to_prompt = {}
+                # Tạo tasks cho mỗi account với số luồng tương ứng
+                future_to_account = {}
                 
                 for account_name, data in self.account_prompts_distribution.items():
-                    account_data = data['account']
-                    prompts = data['prompts']
+                    if self.should_stop:
+                        break
                     
-                    # Submit tasks cho từng account
-                    for prompt_data in prompts:
-                        if self.should_stop:
-                            break
-                        future = self.executor.submit(self.process_video_with_specific_account, prompt_data, account_data)
-                        future_to_prompt[future] = prompt_data
+                    account_data = data['account']
+                    threads_for_account = data['threads']
+                    account_prompts = data['prompts']
+                    
+                    # Tạo một task cho account này với số luồng riêng và prompts riêng
+                    future = self.executor.submit(self.process_account_prompts, account_data, threads_for_account, account_prompts)
+                    future_to_account[future] = account_name
                 
-                # Xử lý kết quả khi hoàn thành với batch processing
-                batch_size = max(1, self.total_count // 20)  # Update mỗi 5%
-                batch_count = 0
-                
-                for future in as_completed(future_to_prompt):
+                # Xử lý kết quả khi hoàn thành
+                for future in as_completed(future_to_account):
                     if self.should_stop:
                         # Cancel các future còn lại
-                        for f in future_to_prompt:
+                        for f in future_to_account:
                             f.cancel()
                         break
                         
-                    prompt_data = future_to_prompt[future]
-                    stt, prompt, image_path = prompt_data
+                    account_name = future_to_account[future]
                     
                     try:
-                        result = future.result()
-                        results.append(result)
-                        self.processed_count += 1
-                        batch_count += 1
+                        account_results = future.result()
+                        results.extend(account_results)
+                        self.processed_count += len(account_results)
                         
-                        # Tối ưu: Chỉ update progress mỗi batch để tránh lag UI
-                        if batch_count >= batch_size or self.processed_count == self.total_count:
-                            progress = int(10 + (self.processed_count / self.total_count) * 85)
-                            status = "✓" if result[2] else "❌"
-                            self.progress_updated.emit(
-                                progress, 
-                                f"{status} STT {stt}: {prompt[:30]}... ({self.processed_count}/{self.total_count})"
-                            )
-                            batch_count = 0
+                        # Update progress
+                        progress = int(10 + (self.processed_count / self.total_count) * 85)
+                        self.progress_updated.emit(
+                            progress, 
+                            f"✅ Hoàn thành {account_name}: {len(account_results)} video ({self.processed_count}/{self.total_count})"
+                        )
                         
                     except Exception as e:
-                        results.append((stt, prompt, False, str(e)))
-                        self.processed_count += 1
-                        batch_count += 1
+                        self.progress_updated.emit(50, f"❌ Lỗi với {account_name}: {str(e)}")
                         
             finally:
                 # Shutdown executor
@@ -1696,7 +1732,7 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout()
         
         # Group: Thông tin Tài khoản
-        account_group = QGroupBox("Tài khoản (Tự động chia tải)")
+        account_group = QGroupBox("Tài khoản (Chia batch tuần tự)")
         account_layout = QVBoxLayout()
         
         self.account_info_label = QLabel("Đang tải danh sách tài khoản...")
@@ -3055,7 +3091,7 @@ class MainWindow(QMainWindow):
                 }
             """)
         else:
-            self.account_info_label.setText(f"✅ {active_count}/{total_accounts} tài khoản hoạt động\n🔄 Tự động chia tải giữa các tài khoản")
+            self.account_info_label.setText(f"✅ {active_count}/{total_accounts} tài khoản hoạt động\n🔄 Chia batch tuần tự: Mỗi account xử lý theo batch")
             self.account_info_label.setStyleSheet("""
                 QLabel {
                     color: #4caf50;
