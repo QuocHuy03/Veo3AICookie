@@ -3868,11 +3868,11 @@ class MainWindow(QMainWindow):
 
 
     
-from auth.auth_guard import KeyLoginDialog, get_device_id
+from auth.auth_guard import KeyLoginDialog, get_device_id, check_key_online
 from version_checker import check_for_update, CURRENT_VERSION
 import sys
 import logging
-
+from config_manager import ConfigManager
 # Constants
 API_URL = "http://62.171.131.164:5000"
 API_AUTH_ENDPOINT = f"{API_URL}/api/make_video_ai/auth"
@@ -3955,19 +3955,68 @@ def main():
             background-color: #fafafa;
         }
     """)
-        # Check for updates
+
+        # Create main window
         if check_for_update(VERSION_CHECK_ENDPOINT):
-            logger.info("Update check completed, exiting")
             return 0
+        
+        # Khởi tạo config manager
+        config_manager = ConfigManager()
+        device_id = get_device_id()[0]
+        
+        # Kiểm tra key đã lưu
+        saved_key, saved_key_info = config_manager.get_saved_api_key(device_id)
+        key_info = {}
+        
+        if saved_key and saved_key_info:
+            # Kiểm tra expiry local trước
+            if config_manager.is_key_expired_locally(device_id):
+                print("Key đã hết hạn (kiểm tra local), xóa key cũ...")
+                config_manager.clear_api_key()
+                saved_key = None
+                saved_key_info = None
+            elif config_manager.should_refresh_key(device_id, force_refresh_hours=24):
+                # Key đã lưu lâu (>24h), kiểm tra với server để đảm bảo
+                print("Key đã lưu lâu, đang kiểm tra với server...")
+                success, message, info = check_key_online(saved_key, API_AUTH_ENDPOINT)
+                
+                if success:
+                    print("Key vẫn hợp lệ, cập nhật thông tin...")
+                    # Cập nhật lại thông tin key với dữ liệu mới từ server
+                    config_manager.save_api_key(saved_key, device_id, info, remember=True)
+                    key_info = info
+                else:
+                    print(f"Key không còn hợp lệ: {message}")
+                    config_manager.clear_api_key()
+                    saved_key = None
+                    saved_key_info = None
+            else:
+                # Key còn "tươi" (<24h), sử dụng thông tin đã lưu
+                print("Sử dụng key đã lưu (không cần kiểm tra server)...")
+                key_info = saved_key_info
+        
+        # Nếu không có key hợp lệ, hiện dialog đăng nhập
+        if not saved_key or not key_info:
+            login_dialog = KeyLoginDialog(API_AUTH_ENDPOINT)
+            if login_dialog.exec_() != QDialog.Accepted or not login_dialog.validated:
+                return 0
             
-        # Authenticate user
-        login_dialog = KeyLoginDialog(API_AUTH_ENDPOINT)
-        if login_dialog.exec_() != QDialog.Accepted or not login_dialog.validated:
-            logger.warning("Authentication failed or cancelled")
-            return 0
+            # Lấy thông tin từ dialog
+            key_info = login_dialog.key_info
+            remember_key = login_dialog.remember_key
             
-        # Get authentication info
-        key_info = login_dialog.key_info
+            # Lưu key nếu user chọn
+            if remember_key:
+                api_key = key_info.get("key")
+                if api_key:
+                    success = config_manager.save_api_key(api_key, device_id, key_info, remember=True)
+                    if success:
+                        print("Đã lưu key thành công!")
+                    else:
+                        print("Không thể lưu key.")
+
+        
+    # Get authentication info (key_info is already set above)
         key = key_info.get("key")
         expires_raw = key_info.get("expires", "")
         remaining = key_info.get("remaining", 0)

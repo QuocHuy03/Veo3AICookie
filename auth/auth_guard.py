@@ -5,7 +5,7 @@ import subprocess
 import requests
 import os
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QHBoxLayout, QSpacerItem, QSizePolicy, QProgressBar, QTextEdit
+    QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QHBoxLayout, QSpacerItem, QSizePolicy, QProgressBar, QTextEdit, QCheckBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
@@ -377,6 +377,7 @@ class KeyLoginDialog(QDialog):
         self.setWindowTitle("Đăng nhập qua API Server - @huyit32")
         self.validated = False
         self.key_info = {}
+        self.remember_key = True  # Mặc định là lưu key
         
         # Set icon cho dialog
   
@@ -421,6 +422,33 @@ class KeyLoginDialog(QDialog):
         """)
         self.key_input.returnPressed.connect(self.validate_key)
         layout.addWidget(self.key_input)
+        
+        # Checkbox lưu key
+        self.remember_key_checkbox = QCheckBox("Lưu key để không phải nhập lại lần sau")
+        self.remember_key_checkbox.setChecked(True)  # Mặc định là lưu
+        self.remember_key_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                color: #555;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 2px solid #ddd;
+                border-radius: 3px;
+                background-color: white;
+            }
+            QCheckBox::indicator:checked {
+                border: 2px solid #2196F3;
+                border-radius: 3px;
+                background-color: #2196F3;
+                image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iMTIiIHZpZXdCb3g9IjAgMCAxMiAxMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEwIDNMNC41IDguNUwyIDYiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
+            }
+        """)
+        layout.addWidget(self.remember_key_checkbox)
         
         # Progress bar
         self.progress_bar = QProgressBar()
@@ -524,6 +552,7 @@ class KeyLoginDialog(QDialog):
             QMessageBox.information(self, "Thành công", message)
             self.validated = True
             self.key_info = info
+            self.remember_key = self.remember_key_checkbox.isChecked()  # Lưu trạng thái checkbox
             self.accept()
         else:
             QMessageBox.critical(self, "Thất bại", message)
