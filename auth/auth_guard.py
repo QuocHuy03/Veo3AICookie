@@ -4,6 +4,11 @@ import platform
 import subprocess
 import requests
 import os
+import time
+import random
+import socket
+import hmac
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QHBoxLayout, QSpacerItem, QSizePolicy, QProgressBar, QTextEdit, QCheckBox
 )
@@ -13,316 +18,154 @@ from requests.exceptions import RequestException, ConnectionError, Timeout
 
 SECRET_SALT = "huydev"
 
-
-def get_device_id():
-    """
-    Tạo device ID ổn định từ thông tin hardware cố định (không phụ thuộc mạng)
-    Trả về: (device_id_hash, display_info, hardware_summary)
-    """
-    # 1. CPU ID - Thông tin quan trọng nhất (unique cho mỗi CPU)
-    cpu_id = get_cpu_id()
-    
-    # 2. Motherboard Serial - Cố định với bo mạch chủ
-    motherboard_serial = get_motherboard_serial()
-    
-    # 3. BIOS Serial - Thông tin BIOS
-    bios_serial = get_bios_serial()
-    
-    # 4. Disk Serial - Serial ổ cứng chính
-    disk_serial = get_primary_disk_serial()
-    
-    # 5. Tạo device fingerprint từ thông tin hardware cố định
-    # KHÔNG sử dụng MAC address để tránh thay đổi theo mạng
-    raw = f"{cpu_id}-{motherboard_serial}-{bios_serial}-{disk_serial}-{SECRET_SALT}"
-    device_id_hash = hashlib.sha256(raw.encode()).hexdigest()
-    
-    # Thông tin hiển thị (để debug)
-    display_info = f"CPU:{cpu_id[:8]}|MB:{motherboard_serial[:8]}|BIOS:{bios_serial[:8]}"
-    hardware_summary = f"{cpu_id}-{motherboard_serial}-{bios_serial}-{disk_serial}"
-    
-    return device_id_hash, display_info, hardware_summary
-
-
-def get_stable_mac_address():
-    """Lấy MAC address ổn định nhất từ card mạng chính"""
-    try:
-        import psutil
-        # Lấy tất cả network interfaces
-        interfaces = psutil.net_if_addrs()
-        
-        # Ưu tiên các interface thật (không phải ảo)
-        preferred_names = ['Ethernet', 'Wi-Fi', 'Local Area Connection', 'Wireless Network Connection']
-        
-        for name in preferred_names:
-            for interface_name, addrs in interfaces.items():
-                if name.lower() in interface_name.lower():
-                    for addr in addrs:
-                        if addr.family == psutil.AF_LINK and addr.address:
-                            # Loại bỏ dấu '-' và ':' để chuẩn hóa
-                            mac = addr.address.replace('-', '').replace(':', '').upper()
-                            if mac and mac != '000000000000':
-                                return mac
-        
-        # Fallback: lấy MAC đầu tiên không phải ảo
-        for interface_name, addrs in interfaces.items():
-            # Bỏ qua các interface ảo
-            if any(skip in interface_name.lower() for skip in ['loopback', 'virtual', 'vmware', 'vbox', 'docker']):
-                continue
-            for addr in addrs:
-                if addr.family == psutil.AF_LINK and addr.address:
-                    mac = addr.address.replace('-', '').replace(':', '').upper()
-                    if mac and mac != '000000000000':
-                        return mac
-    except ImportError:
-        pass
-    except Exception:
-        pass
-    
-    # Fallback cuối cùng: sử dụng uuid.getnode()
-    try:
-        mac = format(uuid.getnode(), '012x').upper()
-        return mac
-    except:
-        return "UNKNOWN_MAC"
-
-
-def get_hardware_serial():
-    """Lấy serial number từ nhiều nguồn hardware"""
-    serial = "unknown"
-    
-    if platform.system() == "Windows":
-        # Thử nhiều cách lấy serial number
-        methods = [
-            get_disk_serial_wmic,
-            get_motherboard_serial_wmic,
-            get_bios_serial_wmic,
-            get_system_serial_reg
-        ]
-        
-        for method in methods:
-            try:
-                result = method()
-                if result and result.strip() and result.strip().lower() not in ['unknown', 'n/a', 'not available', '']:
-                    serial = result.strip()
-                    break
-            except:
-                continue
-    
-    return serial
-
-
-def get_disk_serial_wmic():
-    """Lấy disk serial bằng WMIC"""
-    try:
-        result = subprocess.check_output(
-            "wmic diskdrive get SerialNumber /format:list", 
-            shell=True, 
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        )
-        lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-        for line in lines:
-            if 'SerialNumber=' in line:
-                serial = line.split('=', 1)[1].strip()
-                if serial and serial.lower() not in ['', 'n/a']:
-                    return serial
-    except:
-        pass
-    return None
-
-
-def get_motherboard_serial_wmic():
-    """Lấy motherboard serial bằng WMIC"""
-    try:
-        result = subprocess.check_output(
-            "wmic baseboard get SerialNumber /format:list", 
-            shell=True, 
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        )
-        lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-        for line in lines:
-            if 'SerialNumber=' in line:
-                serial = line.split('=', 1)[1].strip()
-                if serial and serial.lower() not in ['', 'n/a', 'default string']:
-                    return serial
-    except:
-        pass
-    return None
-
-
-def get_bios_serial_wmic():
-    """Lấy BIOS serial bằng WMIC"""
-    try:
-        result = subprocess.check_output(
-            "wmic bios get SerialNumber /format:list", 
-            shell=True, 
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-        )
-        lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-        for line in lines:
-            if 'SerialNumber=' in line:
-                serial = line.split('=', 1)[1].strip()
-                if serial and serial.lower() not in ['', 'n/a', 'default string']:
-                    return serial
-    except:
-        pass
-    return None
-
-
-def get_system_serial_reg():
-    """Lấy system serial từ Windows Registry"""
+# OS-specific stable IDs
+def _get_windows_machine_guid():
     try:
         import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS")
-        serial, _ = winreg.QueryValueEx(key, "SystemSerialNumber")
-        winreg.CloseKey(key)
-        if serial and serial.strip().lower() not in ['', 'n/a', 'default string']:
-            return serial.strip()
-    except:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+        val, _ = winreg.QueryValueEx(key, "MachineGuid")
+        if val:
+            return val.strip()
+    except Exception:
         pass
     return None
 
-
-def get_cpu_id():
-    """Lấy CPU ID - thông tin quan trọng nhất để identify máy"""
+def _get_macos_io_platform_uuid():
     try:
-        if platform.system() == "Windows":
-            result = subprocess.check_output(
-                "wmic cpu get ProcessorId /format:list", 
-                shell=True, 
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-            for line in lines:
-                if 'ProcessorId=' in line:
-                    cpu_id = line.split('=', 1)[1].strip()
-                    if cpu_id and cpu_id.lower() not in ['', 'n/a', 'unknown']:
-                        return cpu_id
-    except:
+        out = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], stderr=subprocess.DEVNULL)
+        out = out.decode(errors="ignore")
+        for line in out.splitlines():
+            if "IOPlatformUUID" in line:
+                parts = line.split("=", 1)
+                if len(parts) > 1:
+                    return parts[1].strip().strip('"')
+    except Exception:
         pass
-    
-    # Fallback: sử dụng platform info
+    return None
+
+def _get_linux_machine_id():
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            val = Path(p).read_text().strip()
+            if val:
+                return val
+        except Exception:
+            pass
+    return None
+
+def _get_fallback_storage_path():
+    home = Path.home()
+    if platform.system() == "Windows":
+        base = os.environ.get("APPDATA", home)
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", home / ".config")
+    return Path(base) / "mycoolapp" / "device_id.txt"
+
+def _get_mac_addresses():
+    # best-effort: list of MACs, may include virtual ones
     try:
-        return f"{platform.processor()}-{platform.machine()}".replace(' ', '_')
-    except:
-        return "UNKNOWN_CPU"
+        import netifaces
+        macs = []
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            if netifaces.AF_LINK in addrs:
+                for a in addrs[netifaces.AF_LINK]:
+                    mac = a.get('addr')
+                    if mac and len(mac) >= 11:
+                        macs.append(mac)
+        return macs
+    except Exception:
+        # fallback using uuid.getnode() (single MAC or random)
+        try:
+            mac_int = uuid.getnode()
+            mac = format(mac_int, '012x')
+            return [mac]
+        except Exception:
+            return []
 
+def get_stable_device_id():
+    """
+    Tries multiple sources in order:
+    1) OS stable ID (MachineGuid / IOPlatformUUID / machine-id)
+    2) persisted UUID in app config dir
+    3) derive a fingerprint from multiple best-effort sources (macs, hostname)
+    Returns: (device_digest, components_dict)
+    """
+    comps = {}
+    system = platform.system()
+    comps['platform'] = system
 
-def get_motherboard_serial():
-    """Lấy serial number của motherboard"""
-    try:
-        if platform.system() == "Windows":
-            result = subprocess.check_output(
-                "wmic baseboard get SerialNumber /format:list", 
-                shell=True, 
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-            for line in lines:
-                if 'SerialNumber=' in line:
-                    serial = line.split('=', 1)[1].strip()
-                    if serial and serial.lower() not in ['', 'n/a', 'default string', 'to be filled by o.e.m.']:
-                        return serial
-    except:
-        pass
-    return "UNKNOWN_MB"
+    os_id = None
+    if system == "Windows":
+        os_id = _get_windows_machine_guid()
+        comps['windows_machine_guid'] = os_id
+    elif system == "Darwin":
+        os_id = _get_macos_io_platform_uuid()
+        comps['mac_io_platform_uuid'] = os_id
+    else:
+        os_id = _get_linux_machine_id()
+        comps['linux_machine_id'] = os_id
 
+    if os_id:
+        primary = f"os:{os_id}"
+    else:
+        # try persisted fallback
+        storage = _get_fallback_storage_path()
+        try:
+            persisted = storage.read_text().strip()
+            if persisted:
+                primary = f"persisted:{persisted}"
+                comps['persisted_path'] = str(storage)
+                comps['persisted_value'] = persisted
+            else:
+                raise FileNotFoundError
+        except Exception:
+            # generate and persist
+            new_uuid = str(uuid.uuid4())
+            try:
+                storage.parent.mkdir(parents=True, exist_ok=True)
+                storage.write_text(new_uuid)
+                primary = f"persisted:{new_uuid}"
+                comps['persisted_path'] = str(storage)
+                comps['persisted_value'] = new_uuid
+            except Exception:
+                # ultimate fallback
+                primary = f"fallback:{str(uuid.uuid4())}"
 
-def get_bios_serial():
-    """Lấy serial number của BIOS"""
-    try:
-        if platform.system() == "Windows":
-            result = subprocess.check_output(
-                "wmic bios get SerialNumber /format:list", 
-                shell=True, 
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-            for line in lines:
-                if 'SerialNumber=' in line:
-                    serial = line.split('=', 1)[1].strip()
-                    if serial and serial.lower() not in ['', 'n/a', 'default string', 'to be filled by o.e.m.']:
-                        return serial
-    except:
-        pass
-    return "UNKNOWN_BIOS"
+    # gather auxiliary (best-effort) data but not relied as single source
+    macs = _get_mac_addresses()
+    comps['macs'] = macs
+    comps['hostname'] = platform.node()
 
+    # combine a few fields to make fingerprint more robust
+    # note: do NOT trust macs alone; they are auxiliary
+    raw = "|".join([primary, comps.get('hostname',"")] + macs[:2])
+    # produce HMAC-SHA256 as irreversible digest
+    digest = hmac.new(SECRET_SALT.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
-def get_primary_disk_serial():
-    """Lấy serial number của ổ cứng chính (thường là C:)"""
-    try:
-        if platform.system() == "Windows":
-            # Lấy serial của ổ cứng chứa Windows (thường là C:)
-            result = subprocess.check_output(
-                r"wmic diskdrive where \"DeviceID='\\.\PHYSICALDRIVE0'\" get SerialNumber /format:list", 
-                shell=True, 
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-            for line in lines:
-                if 'SerialNumber=' in line:
-                    serial = line.split('=', 1)[1].strip()
-                    if serial and serial.lower() not in ['', 'n/a']:
-                        return serial
-            
-            # Fallback: lấy serial của disk đầu tiên
-            result = subprocess.check_output(
-                "wmic diskdrive get SerialNumber /format:list", 
-                shell=True, 
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-            for line in lines:
-                if 'SerialNumber=' in line:
-                    serial = line.split('=', 1)[1].strip()
-                    if serial and serial.lower() not in ['', 'n/a']:
-                        return serial
-    except:
-        pass
-    return "UNKNOWN_DISK"
+    comps['raw_for_hash'] = raw
+    comps['device_digest'] = digest
+    return digest, comps
 
+def get_device_id():
+    """Backward compatibility wrapper"""
+    device_digest, comps = get_stable_device_id()
+    # Return format compatible with old code: (hash, mac, serial)
+    mac = comps.get('macs', ['unknown'])[0] if comps.get('macs') else 'unknown'
+    serial = comps.get('windows_machine_guid', comps.get('mac_io_platform_uuid', 'unknown'))
+    return device_digest, mac, serial
 
-def get_cpu_info():
-    """Lấy thông tin CPU để tăng tính ổn định - DEPRECATED, sử dụng get_cpu_id()"""
-    return get_cpu_id()
-
-
-def get_motherboard_info():
-    """Lấy thông tin motherboard"""
-    try:
-        if platform.system() == "Windows":
-            result = subprocess.check_output(
-                "wmic baseboard get Product,Manufacturer /format:list", 
-                shell=True, 
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            lines = result.decode('utf-8', errors='ignore').strip().split('\n')
-            manufacturer = ""
-            product = ""
-            for line in lines:
-                if 'Manufacturer=' in line:
-                    manufacturer = line.split('=', 1)[1].strip()
-                elif 'Product=' in line:
-                    product = line.split('=', 1)[1].strip()
-            
-            if manufacturer or product:
-                return f"{manufacturer}-{product}"
-    except:
-        pass
-    
-    return "UNKNOWN_MB"
+def get_unique_device_id():
+    """Wrapper for get_stable_device_id with compatible return format"""
+    device_digest, comps = get_stable_device_id()
+    # Return format: (device_id_hash, display_info, hardware_summary)
+    display_info = f"Platform: {comps.get('platform', 'unknown')}"
+    hardware_summary = f"OS ID: {comps.get('windows_machine_guid', comps.get('mac_io_platform_uuid', comps.get('linux_machine_id', 'unknown')))}"
+    return device_digest, display_info, hardware_summary
 
 
 def check_key_online(key: str, api_url: str):
-    device_id_hash, mac, serial = get_device_id()
+    device_id_hash, display_info, hardware_summary = get_unique_device_id()
 
     try:
         response = requests.post(api_url, data={
@@ -347,7 +190,7 @@ def check_key_online(key: str, api_url: str):
         if res.get("success"):
             info = {
                 "key": key,
-                "device_id": f"{mac} | {serial}",
+                "device_id": display_info,
                 "expires": res.get("expires", ""),
                 "remaining": res.get("remaining", "")
             }
