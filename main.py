@@ -966,7 +966,7 @@ class VideoProcessingThread(QThread):
     status_updated = pyqtSignal(str)  # status message for log
     finished = pyqtSignal(list)  # results
     
-    def __init__(self, prompts, accounts_data, config, max_workers=3):
+    def __init__(self, prompts, accounts_data, config, max_workers=5):
         super().__init__()
         self.prompts = prompts
         self.accounts_data = accounts_data  # Changed to support multiple accounts
@@ -1148,9 +1148,9 @@ class VideoProcessingThread(QThread):
                 print("Vào text rồi nè cu hề")
                 # Text-to-video: Select model based on aspect ratio (always 720p)
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
-                    model_key = "veo_3_0_t2v_fast_portrait_ultra"
+                    model_key = "veo_3_1_t2v_fast_portrait_ultra"
                 else:  # LANDSCAPE
-                    model_key = "veo_3_0_t2v_fast_ultra"
+                    model_key = "veo_3_1_t2v_fast_ultra"
                     
                 self.status_updated.emit(f"STT {stt}: 🎬 Generating video...")
                 gen_resp, scene_id = generate_video(
@@ -1325,9 +1325,9 @@ class VideoProcessingThread(QThread):
                 
                 # Image-to-video: Select model based on aspect ratio
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
-                    model_key = "veo_3_i2v_s_fast_portrait_ultra"
+                    model_key = "veo_3_1_i2v_s_fast_portrait_ultra"
                 else:  # LANDSCAPE
-                    model_key = "veo_3_i2v_s_fast_ultra"
+                    model_key = "veo_3_1_i2v_s_fast_ultra"
                     
                 self.status_updated.emit(f"STT {stt}: 📤 Uploading image với {account_name}...")
                 media_id = upload_image(token, image_path, proxy)
@@ -1352,9 +1352,9 @@ class VideoProcessingThread(QThread):
                 
                 # Text-to-video: Select model based on aspect ratio
                 if self.config["aspect_ratio"] == "VIDEO_ASPECT_RATIO_PORTRAIT":
-                    model_key = "veo_3_0_t2v_fast_portrait_ultra"
+                    model_key = "veo_3_1_t2v_fast_portrait_ultra"
                 else:  # LANDSCAPE
-                    model_key = "veo_3_0_t2v_fast_ultra"
+                    model_key = "veo_3_1_t2v_fast_ultra"
                     
                 self.status_updated.emit(f"STT {stt}: 🎬 Generating video với {account_name}...")
                 gen_resp, scene_id = generate_video(
@@ -1804,9 +1804,9 @@ class MainWindow(QMainWindow):
         config_layout.addRow("Seed:", self.seed_spin)
         
         self.max_workers_spin = QSpinBox()
-        self.max_workers_spin.setRange(1, 3)
-        self.max_workers_spin.setValue(3)
-        self.max_workers_spin.setToolTip("Số luồng xử lý song song (1-3)")
+        self.max_workers_spin.setRange(1, 5)
+        self.max_workers_spin.setValue(5)
+        self.max_workers_spin.setToolTip("Số luồng xử lý song song (1-5)")
         config_layout.addRow("Threads:", self.max_workers_spin)
         
         # Aspect Ratio selection
